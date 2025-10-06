@@ -4,8 +4,10 @@
   font-family: 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
   background-color: #f5f7fa;
   color: #2c3e50;
-  padding-left: 250px; 
+  padding-left: 250px;
+  padding-bottom: 80px; /* Space for fixed footer */
   box-sizing: border-box;
+  position: relative;
 }
 
 .dashboard-content {
@@ -16,18 +18,35 @@
   width: 100%;
   max-width: 100%;
   box-sizing: border-box;
+  justify-content: space-between; /* Ensures columns are properly spaced */
 }
 
+/* Main column styles - all columns use flex-basis with different growth factors */
 .dashboard-column {
-  flex: 1;
+  flex: 1 1 25%; /* Default size for side columns */
   min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 24px;
 }
 
+/* Middle column - takes up more space */
+.dashboard-column:nth-child(2) {
+  flex: 2 1 50%; /* Grows more than others */
+  max-width: 50%;
+}
+
+/* First and third columns - equal width */
+.dashboard-column:first-child,
+.dashboard-column:last-child {
+  flex: 1 1 25%;
+  max-width: 25%;
+}
+
+/* Remove the old wide class since we're using a different approach */
 .dashboard-column--wide {
-  flex: 2;
+  flex: 1 1 25% !important;
+  max-width: 25% !important;
 }
 
 .instruction-form {
@@ -165,20 +184,158 @@
 .instruction-form__submit.is-loading {
   opacity: 0.7;
   cursor: not-allowed;
-  background-color: #3a5ce9;
 }
 
-.form-actions {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
+.form-hint {
+  color: #4b5563;
+  font-size: 0.9rem;
+  margin: 0;
+  line-height: 1.5;
+}
+
+/* Prompt display styles */
+.prompt-display {
+  background: #f8f9fa;
+  border: 1px solid #e1e5eb;
+  border-radius: 8px;
+  padding: 16px;
   margin-top: 16px;
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  max-height: 300px;
+  overflow: auto;
 }
 
+.prompt-display h4 {
+  margin: 0 0 12px 0;
+  color: #2c3e50;
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.prompt-content {
+  background: #ffffff;
+  border: 1px solid #e9ecef;
+  border-radius: 6px;
+  padding: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  color: #212529;
+  max-height: 250px;
+  overflow-y: auto;
+}
+
+.prompt-content pre {
+  margin: 0;
+  white-space: pre-wrap;
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+  color: inherit;
+}
+
+.status-message {
+  margin-top: 12px;
+  padding: 10px;
+  border-radius: 6px;
+  font-size: 0.9rem;
+}
+
+.status-success {
+  background-color: #ecfdf5;
+  color: #065f46;
+  border-left: 3px solid #10b981;
+  padding-left: 12px;
+}
+
+.status-error {
+  background-color: #fef2f2;
+  color: #b91c1c;
+  border-left: 3px solid #ef4444;
+  padding-left: 12px;
+}
+
+.status-info {
+  background-color: #eff6ff;
+  color: #1e40af;
+  border-left: 3px solid #3b82f6;
+  padding-left: 12px;
+}
+
+/* Button styles */
 .button-group {
   display: flex;
   gap: 12px;
   align-items: center;
+  flex-wrap: wrap;
+}
+
+.instruction-form__run,
+.instruction-form__repair {
+  padding: 12px 20px;
+  border: none;
+  border-radius: 8px;
+  font-size: 0.95rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+
+.instruction-form__run {
+  background-color: #10b981;
+  color: white;
+}
+
+.instruction-form__run:hover:not(:disabled) {
+  background-color: #0d9f6e;
+}
+
+.instruction-form__repair {
+  background-color: #f59e0b;
+  color: white;
+}
+
+.instruction-form__repair:hover:not(:disabled) {
+  background-color: #d97706;
+}
+
+.instruction-form__run:disabled,
+.instruction-form__repair:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* Footer styles */
+.action-footer {
+  position: fixed;
+  bottom: 0;
+  left: 250px;
+  right: 0;
+  background: #ffffff;
+  padding: 12px 24px;
+  box-shadow: 0 -2px 10px rgba(0, 0, 0, 0.05);
+  z-index: 100;
+  display: flex;
+  justify-content: flex-start; /* Changed from space-between to flex-start */
+  align-items: center;
+  border-top: 1px solid #e5e7eb;
+  gap: 20px; /* Add gap between buttons */
+}
+
+/* Adjust main content padding to account for fixed footer */
+.dashboard-content {
+  padding-bottom: 80px; /* Make space for the fixed footer */
+}
+
+/* Adjust for when sidebar is collapsed */
+@media (max-width: 1200px) {
+  .action-footer {
+    left: 0;
+  }
 }
 
 .instruction-form__run {
