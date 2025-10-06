@@ -1,0 +1,738 @@
+from fastapi import FastAPI, HTTPException, Request, Depends, BackgroundTasks
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+from pathlib import Path
+import os
+import sys
+import subprocess
+import uuid
+from typing import Dict, List, Any, Optional, Tuple, Set
+import re
+import importlib.util
+import asyncio
+import aiohttp
+import json
+import datetime
+from string import Template
+from playwright_monitor import get_playwright_context, get_page_history, stop_monitor
+from LLMClient import LLMClient
+import uvicorn
+
+def get_generate_prompt(instruction: str) -> str:
+    """Generate the prompt for script generation."""
+    return (
+        "You are a RPA assistant that generates a Python script based on a user's instruction "
+        "for interactions with web applications using the Playwright package.\n\n"
+        f"The user's instructions are: {instruction}\n"
+        "What would be your proposed Python script?"
+    )
+
+def get_repair_prompt(instruction: str, error_context: str, original_script: str, page_history: List[Dict[str, Any]] = None) -> str:
+    """Generate the prompt for script repair.
+    
+    Args:
+        instruction: The original user instruction
+        error_context: Formatted error context including any page history
+        original_script: The script that needs to be fixed
+        page_history: List of page objects containing page titles, URLs, and HTML content
+    """
+    prompt_parts = [
+        "You are a RPA assistant that generates a Python script based on a user's instruction "
+        "for interactions with web applications using the Playwright package.\n\n"
+        f"The user is trying to fix an error in their script. Here's the error that occurred:\n{error_context}\n\n"
+        f"Here's the original script that had the error:\n```python\n{original_script}\n```\n\n"
+    ]
+    
+    # Add page history if available
+    if page_history:
+        prompt_parts.append("=== PAGE HISTORY ===\n")
+        MAX_HTML_PREVIEW = 8000
+        for i, page in enumerate(page_history, 1):
+            page_info = f"--- Page {i}: {page.get('title', 'No title')} ({page.get('url', 'No URL')}) ---\n"
+            if 'html' in page:
+                html_preview = page['html'][:MAX_HTML_PREVIEW]
+                if len(page['html']) > MAX_HTML_PREVIEW:
+                    html_preview += "\n... [truncated]"
+                page_info += f"HTML Preview (first {len(html_preview)} characters):\n{html_preview}\n"
+            prompt_parts.append(page_info)
+    
+    prompt_parts.extend([
+        "\nPlease generate a corrected version of the script that fixes the error while maintaining the original functionality.",
+        f"The user's original instruction was: {instruction}"
+    ])
+    
+    return "\n".join(prompt_parts)
+
+llm_client = LLMClient()
+
+app = FastAPI(title="Automator Backend")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5000",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+DATA_DIR = Path("data")
+DATA_DIR.mkdir(exist_ok=True)
+
+# Create scripts directory if it doesn't exist
+SCRIPTS_DIR = Path("scripts")
+SCRIPTS_DIR.mkdir(exist_ok=True)
+
+class InstructionRequest(BaseModel):
+    content: str
+    error_context: Optional[str] = None
+    original_script: Optional[str] = None
+
+class UrlValidationRequest(BaseModel):
+    script_content: str
+
+class UrlValidationResponse(BaseModel):
+    accessible: bool
+    inaccessible_urls: List[str]
+    all_urls: List[str]
+
+@app.post("/api/scripts/validate-urls", response_model=UrlValidationResponse)
+async def validate_urls(request: UrlValidationRequest):
+    """
+    Validate all URLs in a script to ensure they are accessible.
+    """
+    try:
+        # Extract URLs from script content using regex
+        url_pattern = r'https?://(?:[\w-]+\.)+[a-z]{2,}(?::\d+)?(?:/[^\s"\'<>\[\]{}()]*)?'
+        urls = re.findall(url_pattern, request.script_content, re.IGNORECASE)
+        
+        # Remove duplicates while preserving order
+        unique_urls = []
+        seen = set()
+        for url in urls:
+            if url not in seen:
+                seen.add(url)
+                unique_urls.append(url)
+        
+        # Check accessibility of each URL
+        inaccessible_urls = []
+        
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        
+        async def check_url(url):
+            try:
+                # First try with HEAD
+                try:
+                    async with aiohttp.ClientSession() as session:
+                        async with session.head(url, headers=headers, timeout=10, allow_redirects=True) as response:
+                            if response.status < 400:
+                                return None
+                            # If HEAD fails with 403, try with GET
+                            if response.status == 403:
+                                raise Exception('HEAD not allowed, trying GET')
+                            return url
+                except Exception as e:
+                    # If HEAD fails, try with GET
+                    if 'HEAD' in str(e) or '405' in str(e) or '403' in str(e):
+                        async with aiohttp.ClientSession() as session:
+                            async with session.get(url, headers=headers, timeout=10, allow_redirects=True) as response:
+                                if response.status >= 400:
+                                    return url
+                                return None
+                    return url
+            except (aiohttp.ClientError, asyncio.TimeoutError, Exception) as e:
+                return url
+        
+        # Check all URLs concurrently
+        tasks = [check_url(url) for url in unique_urls]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Process results
+        inaccessible_urls = [url for url in results if url is not None]
+        
+        return {
+            "accessible": len(inaccessible_urls) == 0,
+            "inaccessible_urls": inaccessible_urls,
+            "all_urls": unique_urls
+        }
+        
+    except Exception as e:
+        import traceback
+        print(f"Error in validate_urls: {str(e)}\n{traceback.format_exc()}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error validating URLs: {str(e)}"
+        )
+
+class UrlValidationResponse(BaseModel):
+    accessible: bool
+    inaccessible_urls: List[str]
+    all_urls: List[str]
+    
+class LLMResponse(BaseModel):
+    success: bool
+    response: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+
+@app.post("/api/scripts/repair")
+async def repair_script(instruction: InstructionRequest):
+    """
+    Repair a script based on error context, original script, and page history.
+    """
+    if not instruction.error_context or not instruction.original_script:
+        raise HTTPException(status_code=400, detail="Error context and original script are required for repair")
+    
+    try:
+        # Parse the error context to get additional metadata
+        error_context = {}
+        try:
+            if instruction.error_context:
+                error_context = json.loads(instruction.error_context)
+        except json.JSONDecodeError:
+            # If not JSON, keep as string
+            error_context = {"raw_error": instruction.error_context}
+        
+        # Get page history if available
+        page_history = error_context.get("page_history", [])
+        page_context = ""
+        
+        if page_history:
+            page_context = "\n\n=== PAGE HISTORY ===\n"
+            for i, page in enumerate(page_history, 1):
+                page_context += f"\n--- Page {i}: {page.get('title', 'No title')} ({page.get('url', 'No URL')}) ---\n"
+                if 'html' in page:
+                    # Truncate HTML to avoid hitting token limits
+                    html_preview = page['html'][:2000] + ('' if len(page['html']) <= 2000 else '... [truncated]')
+                    page_context += f"HTML Preview:\n{html_preview}\n"
+        
+        # Prepare error details with page history
+        error_details = {
+            **error_context,
+            "page_history_preview": page_context if page_context else 'No page history available'
+        }
+        
+        prompt = get_repair_prompt(
+            instruction=instruction.content,
+            error_context=json.dumps(error_details, indent=2, default=str),
+            original_script=instruction.original_script
+        )
+        
+        llm_response = await llm_client.generate_text(
+            prompt=prompt,
+            max_tokens=-1,
+            temperature=0.3  # Lower temperature for more deterministic repairs
+        )
+        
+        generated_content = llm_response.get('choices', [{}])[0].get('message', {}).get('content', '')
+        python_script = generated_content.split('```python')[1].split('```')[0].strip()
+        
+        # Save the repaired script
+        script_id = str(uuid.uuid4())
+        script_filename = f"script_{script_id}.py"
+        script_path = SCRIPTS_DIR / script_filename
+        
+        with open(script_path, 'w', encoding='utf-8') as f:
+            f.write(python_script)
+        
+        return {
+            "status": "success",
+            "message": "Script repaired successfully",
+            "script_path": str(script_path),
+            "script_id": script_id,
+            "script_content": python_script,
+            "is_repair": True
+        }
+    except Exception as e:
+        error_msg = f"Error repairing script: {str(e)}"
+        raise HTTPException(status_code=500, detail=error_msg)
+
+@app.post("/api/instructions/")
+async def create_instruction(instruction: InstructionRequest):
+    """
+    Process an instruction using the local LLM and return the result.
+    """
+    try:
+        if instruction.error_context and instruction.original_script:
+            prompt = get_repair_prompt(
+                instruction=instruction.content,
+                error_context=instruction.error_context,
+                original_script=instruction.original_script
+            )
+        else:
+            prompt = get_generate_prompt(instruction.content)
+        print("Generated prompt:", prompt)
+        llm_response = await llm_client.generate_text(
+            prompt=prompt,
+            max_tokens=-1,  # -1 means use maximum context length
+            temperature=0.7  # Default temperature
+        )
+
+        generated_content = llm_response.get('choices', [{}])[0].get('message', {}).get('content', '')
+        python_script = generated_content.split('```python')[1].split('```')[0]
+        
+        # Save the generated script to a file
+        script_id = str(uuid.uuid4())
+        script_filename = f"script_{script_id}.py"
+        script_path = SCRIPTS_DIR / script_filename
+        
+        with open(script_path, 'w', encoding='utf-8') as f:
+            f.write(python_script)
+        
+        return {
+            "status": "success",
+            "message": "Script created",
+            "script_path": str(script_path),
+            "script_id": script_id
+        }
+    except Exception as e:
+        error_msg = f"Error processing instruction: {str(e)}"
+        raise HTTPException(status_code=500, detail=error_msg)
+
+def install_package(package_name: str) -> bool:
+    """Install a Python package using pip."""
+    try:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", package_name])
+        return True
+    except subprocess.CalledProcessError:
+        return False
+
+def get_imports_from_script(script_path: str) -> Set[str]:
+    """Extract all imported packages from a Python script."""
+    with open(script_path, 'r', encoding='utf-8') as f:
+        content = f.read()
+    
+    # Find all import statements
+    import_pattern = re.compile(r'^\s*(?:import\s+([^\s,.]+)(?:\s*,\s*([^\s,.]+))*|from\s+([^\s.]+)\s+import\s+[^\s]+)', re.MULTILINE)
+    imports = set()
+    
+    for match in import_pattern.finditer(content):
+        for group in match.groups():
+            if group and not group.startswith('.'):  # Skip relative imports
+                imports.add(group.split('.')[0])  # Only take the base package name
+    
+    # Remove standard library modules
+    stdlib = set(sys.builtin_module_names) | set(sys.stdlib_module_names)
+    return imports - stdlib
+
+async def ensure_packages_installed(script_path: str) -> tuple[bool, str]:
+    """Ensure all required packages are installed."""
+    try:
+        required_packages = get_imports_from_script(script_path)
+        missing_packages = []
+        
+        for package in required_packages:
+            if importlib.util.find_spec(package) is None:
+                missing_packages.append(package)
+        
+        if not missing_packages:
+            return True, "All required packages are already installed"
+        
+        # Try to install missing packages
+        success = []
+        failed = []
+        
+        for package in missing_packages:
+            if install_package(package):
+                success.append(package)
+            else:
+                failed.append(package)
+        
+        if failed:
+            return False, f"Failed to install packages: {', '.join(failed)}"
+            
+        return True, f"Successfully installed packages: {', '.join(success)}"
+    except Exception as e:
+        return False, f"Error checking/installing packages: {str(e)}"
+
+def _inject_playwright_monitoring(script_content: str) -> Tuple[str, bool]:
+    """Inject monitoring code into the script if it uses Playwright"""
+    if "from playwright.sync_api" not in script_content and \
+       "import playwright.sync_api" not in script_content:
+        return script_content, False
+    
+    # Add sys and path manipulation at the top if not present
+    path_setup = """import sys
+from pathlib import Path
+
+# Add backend directory to Python path
+backend_dir = str(Path(__file__).parent.parent)
+if backend_dir not in sys.path:
+    sys.path.append(backend_dir)
+"""
+    
+    # Add our monitor import after path setup
+    monitor_import = 'from playwright_monitor import get_playwright_context'
+    
+    if monitor_import not in script_content:
+        if "import sys" not in script_content:
+            # Add both path setup and monitor import at the top
+            script_content = f"{path_setup}\n{monitor_import}\n\n{script_content}"
+        else:
+            # Just add the monitor import after existing imports
+            lines = script_content.split('\n')
+            for i, line in enumerate(lines):
+                if line.startswith(('import ', 'from ')) and 'playwright' in line:
+                    lines.insert(i + 1, monitor_import)
+                    break
+            script_content = '\n'.join(lines)
+    
+    # Replace browser.new_context() with our monitored version
+    if 'browser.new_context(' in script_content:
+        script_content = script_content.replace(
+            'browser.new_context(', 
+            'get_playwright_context()  # Injected monitored context\n        # '
+        )
+    
+    return script_content, True
+
+async def run_script(script_path: str) -> dict:
+    """
+    Execute a Python script and return the result with detailed error information.
+    First ensures all required packages are installed.
+    
+    Returns:
+        dict: A dictionary containing:
+            - success (bool): Whether the script executed successfully
+            - stdout (str): Standard output from the script
+            - stderr (str): Standard error output
+            - returncode (int): The script's return code
+            - script_content (str): The script's content (for error reporting)
+            - error_type (str): Type of error if one occurred
+            - error_details (dict): Additional error details
+    """
+    script_content = ""
+    monitoring_enabled = False
+    
+    def format_error(title: str, error: Exception, context: dict = None) -> dict:
+        """Helper to format consistent error responses"""
+        import traceback
+        error_trace = traceback.format_exc()
+        error_details = {
+            "error": str(error),
+            "type": type(error).__name__,
+            "traceback": error_trace,
+            "script_path": str(script_path),
+            "monitoring_enabled": monitoring_enabled
+        }
+        if context:
+            error_details.update(context)
+            
+        print(f"\n=== {title} ===")
+        print(f"Error: {error}")
+        print(f"Type: {type(error).__name__}")
+        print("\nTraceback:")
+        print(error_trace)
+        
+        return {
+            "success": False,
+            "error": str(error),
+            "error_type": type(error).__name__,
+            "error_details": error_details,
+            "script_content": script_content,
+            "stderr": f"{title}: {error}\n\n{error_trace}",
+            "stdout": ""
+        }
+
+    try:
+        # Read the script content to include in error reporting
+        try:
+            with open(script_path, 'r', encoding='utf-8') as f:
+                script_content = f.read()
+        except Exception as e:
+            return format_error("Failed to read script file", e, {"script_path": str(script_path)})
+            
+        try:
+            # Inject monitoring code if the script uses Playwright
+            script_content, monitoring_enabled = _inject_playwright_monitoring(script_content)
+            if monitoring_enabled:
+                # Write the modified script to a temporary file
+                script_str = str(script_path)
+                temp_script = script_str.replace('.py', '_monitored.py')
+                try:
+                    with open(temp_script, 'w', encoding='utf-8') as f:
+                        f.write(script_content)
+                    script_path = Path(temp_script)
+                except Exception as e:
+                    return format_error("Failed to write monitored script", e, {"temp_script": temp_script})
+        except Exception as e:
+            return format_error("Failed to inject monitoring code", e)
+            
+        print(f"\n=== Package Installation ===")
+        print(f"Ensuring packages are installed for script: {script_path}")
+        try:
+            install_success, install_message = await ensure_packages_installed(script_path)
+            if not install_success:
+                error_msg = f"Dependency installation failed: {install_message}"
+                print(error_msg)
+                return {
+                    "success": False,
+                    "stderr": error_msg,
+                    "returncode": 1,
+                    "script_content": script_content,
+                    "error_type": "dependency_error",
+                    "error_details": {
+                        "message": install_message,
+                        "script_path": str(script_path)
+                    }
+                }
+            print(install_message)
+        except Exception as e:
+            return format_error("Package installation error", e)
+        
+        print(f"\n=== Script Execution ===")
+        print(f"Executing script: {script_path}")
+        
+        try:
+            # Run the script and capture output
+            result = subprocess.run(
+                [sys.executable, str(script_path)],
+                capture_output=True,
+                text=True,
+                timeout=300,  # 5 minutes timeout
+                env={"PYTHONUNBUFFERED": "1", **os.environ}  # Ensure output is not buffered
+            )
+            
+            print(f"\n=== Script Execution Completed ===")
+            print(f"Return code: {result.returncode}")
+            
+            if result.stdout:
+                print("\n=== Standard Output ===")
+                print(result.stdout)
+                
+            if result.stderr:
+                print("\n=== Error Output ===")
+                print(result.stderr)
+            
+            # Get page history if monitoring was enabled
+            page_history = []
+            if monitoring_enabled:
+                try:
+                    page_history = get_page_history()
+                    print("\n=== Page Access History ===")
+                    for i, page in enumerate(page_history, 1):
+                        print(f"{i}. {page.get('url', 'No URL')} - {page.get('title', 'No title')}")
+                except Exception as e:
+                    print(f"\nFailed to get page history: {str(e)}")
+                finally:
+                    stop_monitor()
+            
+            # Prepare response
+            response = {
+                "success": result.returncode == 0,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "returncode": result.returncode,
+                "error_type": "execution_error" if result.returncode != 0 else None,
+                "page_history": page_history if monitoring_enabled else [],
+                "execution_details": {
+                    "script_path": str(script_path),
+                    "monitoring_enabled": monitoring_enabled,
+                    "pages_accessed": len(page_history) if monitoring_enabled else 0
+                }
+            }
+            
+            if result.returncode != 0:
+                response["error"] = f"Script failed with return code {result.returncode}"
+                response["error_details"] = {
+                    "suggestions": [
+                        "Check the error output above for details",
+                        "Verify all required dependencies are installed",
+                        "Check if the target website structure has changed"
+                    ]
+                }
+                
+            return response
+            
+        except subprocess.TimeoutExpired as e:
+            return format_error("Script execution timed out", e, {
+                "timeout_seconds": 300,
+                "suggestions": [
+                    "The script took too long to execute (5 minute timeout)",
+                    "Consider optimizing the script for better performance",
+                    "Check for infinite loops or long-running operations"
+                ]
+            })
+            
+        except subprocess.CalledProcessError as e:
+            return format_error("Script execution failed", e, {
+                "returncode": e.returncode,
+                "cmd": e.cmd,
+                "output": e.output,
+                "suggestions": [
+                    f"Script returned non-zero exit status {e.returncode}",
+                    "Check the error output above for more details",
+                    "Make sure all required dependencies are installed"
+                ]
+            })
+            
+        except Exception as e:
+            return format_error("Unexpected error during script execution", e)
+    except subprocess.TimeoutExpired as e:
+        error_msg = "Script execution timed out after 5 minutes"
+        print(error_msg)
+        # Get page history if monitoring was enabled
+        page_history = []
+        if monitoring_enabled:
+            page_history = get_page_history()
+            stop_monitor()
+            
+        return {
+            "success": False,
+            "error": error_msg,
+            "script_content": script_content,
+            "error_type": "timeout_error",
+            "stderr": error_msg,
+            "stdout": "",
+            "page_history": page_history
+        }
+    except subprocess.CalledProcessError as e:
+        error_msg = f"Script failed with return code {e.returncode}: {str(e)}"
+        print(error_msg)
+        if e.stderr:
+            print(f"Error output:\n{e.stderr}")
+        if e.stdout:
+            print(f"Script output:\n{e.stdout}")
+            
+        # Get page history if monitoring was enabled
+        page_history = []
+        if monitoring_enabled:
+            page_history = get_page_history()
+            stop_monitor()
+            
+        return {
+            "success": False,
+            "error": error_msg,
+            "stderr": getattr(e, 'stderr', ''),
+            "stdout": getattr(e, 'stdout', ''),
+            "returncode": e.returncode,
+            "script_content": script_content,
+            "error_type": "execution_error",
+            "page_history": page_history
+        }
+    except Exception as e:
+        import traceback
+        error_trace = traceback.format_exc()
+        error_msg = f"Unexpected error: {str(e)}\n{error_trace}"
+        print(error_msg)
+        # Get page history if monitoring was enabled
+        page_history = []
+        if monitoring_enabled:
+            page_history = get_page_history()
+            stop_monitor()
+            
+        return {
+            "success": False,
+            "error": str(e),
+            "traceback": error_trace,
+            "script_content": script_content,
+            "error_type": "unexpected_error",
+            "stderr": error_msg,
+            "stdout": "",
+            "page_history": page_history
+        }
+
+@app.post("/api/scripts/{script_id}/run")
+async def execute_script(script_id: str):
+    """
+    Execute a previously generated script by its ID.
+    """
+    script_path = SCRIPTS_DIR / f"script_{script_id}.py"
+    
+    if not script_path.exists():
+        raise HTTPException(
+            status_code=404, 
+            detail={
+                "status": "error",
+                "error": "Script not found",
+                "script_id": script_id,
+                "script_path": str(script_path)
+            }
+        )
+    
+    try:
+        print(f"Starting execution of script: {script_path}")
+        result = await run_script(script_path)
+        
+        response = {
+            "status": "success" if result["success"] else "error",
+            "message": "Script executed successfully" if result["success"] else "Script execution failed",
+            "output": result.get("stdout", ""),
+            "error": result.get("stderr", result.get("error", "")),
+            "returncode": result.get("returncode", -1),
+            "error_type": result.get("error_type", "")
+        }
+        
+        if not result["success"]:
+            print(f"Script execution failed with error: {response['error']}")
+            if "traceback" in result:
+                print(f"Traceback:\n{result['traceback']}")
+        
+        return response
+        
+    except Exception as e:
+        import traceback
+        error_detail = {
+            "status": "error",
+            "error": str(e),
+            "traceback": traceback.format_exc(),
+            "script_id": script_id,
+            "script_path": str(script_path)
+        }
+        print(f"Unexpected error in execute_script: {error_detail}")
+        raise HTTPException(status_code=500, detail=error_detail)
+
+@app.post("/api/llm/generate")
+async def generate_text(request: Dict[str, Any]):
+    """
+    Direct endpoint to generate text using the LLM.
+    
+    Example request body:
+    {
+        "prompt": "Tell me a joke about programming",
+    }
+    """
+    try:
+        response = await LLMClient.generate_text(
+            prompt=request.get('prompt', ''),
+            max_tokens=request.get('max_tokens', 2000),
+            temperature=request.get('temperature', 0.7),
+            **{k: v for k, v in request.items() 
+               if k not in ['prompt', 'max_tokens', 'temperature']}
+        )
+        return {"success": True, "response": response}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+@app.get("/api/scripts/{script_id}")
+async def get_script(script_id: str):
+    """
+    Get the content of a script by its ID.
+    """
+    try:
+        script_path = SCRIPTS_DIR / f"script_{script_id}.py"
+        if not script_path.exists():
+            raise HTTPException(status_code=404, detail="Script not found")
+            
+        with open(script_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+            
+        return {
+            "status": "success",
+            "content": content,
+            "script_id": script_id,
+            "script_path": str(script_path)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error reading script: {str(e)}")
+
+@app.get("/api/health")
+async def health_check():
+    """Health check endpoint."""
+    return {"status": "ok", "message": "Service is running"}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
