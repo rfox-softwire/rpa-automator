@@ -23,9 +23,12 @@ export interface ScriptError {
   returncode?: number;
   script_content?: string;
   script_id?: string;
+  script_path?: string;
   error_type?: string;
   traceback?: string;
   page_history?: PageHistoryItem[];
+  suggestions?: string[];
+  details?: any;
 }
 
 export interface InstructionFormData {

@@ -33,6 +33,45 @@ llm_service = LLMService(llm_client=llm_client)
 def get_llm_service():
     return llm_service
 
+@router.post("/scripts/repair", response_model=Dict[str, Any])
+async def repair_script(
+    instruction: InstructionRequest,
+    request: Request = None
+) -> Dict[str, Any]:
+    """Repair a script based on error context and original script."""
+    try:
+        # Log the incoming request
+        logger.info(f"Received repair request: {instruction.dict()}")
+        if request:
+            logger.info(f"Request headers: {dict(request.headers)}")
+            try:
+                body = await request.body()
+                logger.info(f"Request body: {body.decode()}")
+            except Exception as e:
+                logger.warning(f"Could not log request body: {e}")
+
+        # Ensure we have the required error context and original script for repair
+        if instruction.error_context is not None and not instruction.original_script:
+            raise HTTPException(
+                status_code=400,
+                detail="original_script is required when error_context is provided"
+            )
+            
+        # Log the error context if present
+        if instruction.error_context:
+            logger.info(f"Error context: {instruction.error_context}")
+            if instruction.original_script:
+                logger.info(f"Original script length: {len(instruction.original_script)} characters")
+
+        # Return the result directly as the response
+        result = await llm_service.generate_script(instruction)
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error repairing script: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.post("/instructions/", response_model=Dict[str, Any])
 async def create_instruction(
     instruction: InstructionRequest,
@@ -49,21 +88,16 @@ async def create_instruction(
                 body = await request.body()
                 logger.info(f"Request body: {body.decode()}")
             except Exception as e:
-                logger.warning(f"Could not log request body: {str(e)}")
-        return await llm_service.generate_script(instruction)
-    except Exception as e:
-        error_msg = f"Error processing instruction: {str(e)}"
-        raise HTTPException(status_code=500, detail=error_msg)
+                logger.warning(f"Could not log request body: {e}")
 
-# @router.post("/scripts/validate-urls", response_model=UrlValidationResponse)
-# async def validate_urls(request: UrlValidationRequest) -> UrlValidationResponse:
-#     """Validate all URLs in a script to ensure they are accessible."""
-#     try:
-#         result = await script_service.validate_urls(request.script_content)
-#         return UrlValidationResponse(**result)
-#     except Exception as e:
-#         error_msg = f"Error validating URLs: {str(e)}"
-#         raise HTTPException(status_code=500, detail=error_msg)
+        # Return the result directly as the response
+        result = await llm_service.generate_script(instruction)
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error processing instruction: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/scripts/{script_id}", response_model=Dict[str, Any])
 async def get_script(script_id: str) -> Dict[str, Any]:
@@ -93,30 +127,87 @@ async def execute_script(script_id: str) -> Dict[str, Any]:
     try:
         script_path = script_service.scripts_dir / f"script_{script_id}.py"
         if not script_path.exists():
-            raise HTTPException(status_code=404, detail="Script not found")
+            raise HTTPException(
+                status_code=404, 
+                detail={
+                    "error_type": "ScriptNotFoundError",
+                    "message": f"Script with ID {script_id} not found",
+                    "script_id": script_id,
+                    "suggestions": [
+                        "Check if the script ID is correct",
+                        "The script may have been deleted or never created"
+                    ]
+                }
+            )
         
+        logger.info(f"Executing script: {script_path}")
         result = await script_service.run_script(str(script_path))
         
         if result.success:
             return {
                 "status": "success",
                 "output": result.stdout,
-                "script_id": script_id
+                "script_id": script_id,
+                "execution_time": getattr(result, 'execution_time', None)
             }
         else:
-            return {
-                "status": "error",
-                "error_type": result.error_type,
-                "error_details": result.error_details,
-                "stderr": result.stderr,
-                "script_id": script_id
+            # Format a more detailed error response
+            error_details = {
+                "error_type": result.error_type or "ScriptExecutionError",
+                "message": result.error_details.get("message", "Script execution failed") if result.error_details else "Script execution failed",
+                "script_id": script_id,
+                "suggestions": []
             }
             
-    except HTTPException:
-        raise
+            # Add specific suggestions based on error type
+            if "ModuleNotFoundError" in str(result.error_type):
+                error_details["suggestions"] = [
+                    "The script is trying to use a Python module that is not installed",
+                    f"Try installing the missing module with: pip install {result.error_details.get('message', '').split()[-1]}"
+                ]
+            elif "TimeoutError" in str(result.error_type):
+                error_details["suggestions"] = [
+                    "The script took too long to execute (timeout after 5 minutes)",
+                    "Check for infinite loops or long-running operations in your script",
+                    "Consider optimizing your script or increasing the timeout if needed"
+                ]
+            elif "FileNotFoundError" in str(result.error_type):
+                error_details["suggestions"] = [
+                    "The script is trying to access a file that doesn't exist",
+                    f"Check if the file path is correct: {result.error_details.get('message', '')}",
+                    "Make sure all required files are in the correct location"
+                ]
+            
+            # Include the full error details if available
+            if hasattr(result, 'error_details') and result.error_details:
+                error_details["details"] = result.error_details
+            
+            # Include stderr if available
+            if hasattr(result, 'stderr') and result.stderr:
+                error_details["stderr"] = result.stderr
+                
+            return {
+                "status": "error",
+                **error_details
+            }
+            
+    except HTTPException as http_exc:
+        # Re-raise HTTP exceptions as is
+        raise http_exc
     except Exception as e:
-        error_msg = f"Error executing script: {str(e)}"
-        raise HTTPException(status_code=500, detail=error_msg)
+        logger.error(f"Unexpected error executing script {script_id}: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error_type": "InternalServerError",
+                "message": f"An unexpected error occurred while executing the script: {str(e)}",
+                "script_id": script_id,
+                "suggestions": [
+                    "Check the server logs for more detailed error information",
+                    "Contact support if the issue persists"
+                ]
+            }
+        )
 
 @router.post("/generate-text", response_model=LLMResponse)
 async def generate_text(request: Dict[str, Any], llm_service: LLMService = Depends()) -> LLMResponse:
@@ -135,7 +226,7 @@ async def generate_text(request: Dict[str, Any], llm_service: LLMService = Depen
             
         response = await llm_service.llm_client.generate_text(
             prompt=prompt,
-            max_tokens=request.get("max_tokens", 100),
+            max_tokens=request.get("max_tokens", -1),
             temperature=request.get("temperature", 0.7)
         )
         

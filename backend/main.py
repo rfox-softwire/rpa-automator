@@ -75,9 +75,6 @@ app.add_middleware(
 # Include API routes
 app.include_router(router)
 
-# Create necessary directories
-os.makedirs("scripts", exist_ok=True)
-
 if __name__ == "__main__":
     logger.info("Starting Automator Backend...")
     uvicorn.run(

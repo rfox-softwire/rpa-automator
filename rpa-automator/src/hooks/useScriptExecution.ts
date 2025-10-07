@@ -45,44 +45,97 @@ export const useScriptExecution = () => {
       
       const startMessage = 'All resources validated. Running script...';
       console.log(`[ScriptExecution] ${startMessage}`);
-      setScriptOutput(prev => prev + 'Starting script execution...\n');
+      setScriptOutput(prev => prev + `${startMessage}\n`);
       
       const result = await runScript(scriptId);
       
       if (result.success) {
         console.log('[ScriptExecution] Script executed successfully');
-        const output = result.stdout || '';
+        const output = result.stdout || 'No output from script';
         console.log(`[ScriptExecution] Script output: ${output.substring(0, 200)}${output.length > 200 ? '...' : ''}`);
-        setScriptOutput(prev => prev + (output || 'No output from script'));
+        setScriptOutput(prev => prev + (output ? `\n${output}` : ''));
         setStatus({ type: 'success', message: 'Script executed successfully' });
       } else {
-        console.error('[ScriptExecution] Script execution failed:', result);
-        const errorMessage = result.error || result.error_type || 'Script execution failed';
+        // Handle error response from the API
+        console.log('[ScriptExecution] Script execution failed, processing error details...');
+        
+        // Use the script content from the error response if available, otherwise use the one from props
+        const errorScriptContent = result.script_content || scriptContent;
+        
+        // Create error details object
         const errorDetails: ScriptError = {
-          error: errorMessage,
+          error: result.error || 'Unknown error occurred',
           stderr: result.stderr || '',
           stdout: result.stdout || '',
           returncode: result.returncode,
-          script_content: scriptContent,
+          script_content: errorScriptContent,
           error_type: result.error_type || 'execution_error',
-          traceback: result.traceback || ''
+          traceback: result.traceback || '',
+          suggestions: Array.isArray(result.suggestions) ? result.suggestions : [],
+          details: result.details || result.error_details
         };
         
+        const hasSuggestions = errorDetails.suggestions && errorDetails.suggestions.length > 0;
+        
+        // Log detailed error information
+        console.error('[ScriptExecution] Script execution failed:', {
+          error: errorDetails.error,
+          type: errorDetails.error_type,
+          returnCode: errorDetails.returncode,
+          hasStderr: !!errorDetails.stderr,
+          hasTraceback: !!errorDetails.traceback,
+          hasSuggestions: hasSuggestions
+        });
+        
+        // Format error output for display
+        const errorOutputParts = [
+          `\nError: ${errorDetails.error}`,
+          errorDetails.error_type && `Type: ${errorDetails.error_type}`,
+          errorDetails.returncode !== undefined && `Exit Code: ${errorDetails.returncode}`,
+          
+          // Add suggestions if available
+          hasSuggestions ? [
+            '\nSuggestions:',
+            ...(errorDetails.suggestions || []).map((s: string) => `• ${s}`)
+          ].join('\n') : null,
+          
+          // Add stderr if available
+          errorDetails.stderr && `\nError Output:\n${errorDetails.stderr}`,
+          
+          // Add traceback if available
+          errorDetails.traceback && `\nTraceback:\n${errorDetails.traceback}`,
+          
+          // Add additional details if available
+          errorDetails.details && `\nDetails:\n${typeof errorDetails.details === 'string' 
+            ? errorDetails.details 
+            : JSON.stringify(errorDetails.details, null, 2)}`
+        ].filter(Boolean).join('\n') + '\n';
+        
+        // Update state with error information
         setScriptError(errorDetails);
-        setScriptOutput(prev => prev + 
-          '\nError: ' + errorMessage +
-          (result.stderr ? '\n' + result.stderr : '') +
-          (result.traceback ? '\n\nTraceback:\n' + result.traceback : '')
-        );
-        setStatus({ type: 'error', message: `Script execution failed: ${errorMessage}` });
+        setScriptOutput(prev => prev + errorOutputParts);
+        setStatus({ 
+          type: 'error', 
+          message: `Script execution failed: ${errorDetails.error}` 
+        });
       }
     } catch (error) {
-      console.error('[ScriptExecution] Unexpected error:', error);
+      // This catch block is for unexpected errors (like network issues)
       const errorMessage = error instanceof Error ? error.message : 'An unknown error occurred';
-      const errorDetails = error instanceof Error ? error.stack : JSON.stringify(error);
-      setScriptOutput(prev => prev + '\nUnexpected error: ' + errorMessage + '\n' + (errorDetails || ''));
-      setStatus({ type: 'error', message: `Error: ${errorMessage}` });
-      setStatus({ type: 'error', message: `Error: ${errorMessage}` });
+      const errorDetails: ScriptError = {
+        error: errorMessage,
+        error_type: 'unexpected_error',
+        script_content: scriptContent,
+        traceback: error instanceof Error ? error.stack : undefined
+      };
+      
+      console.error('[ScriptExecution] Unexpected error:', error);
+      setScriptError(errorDetails);
+      setScriptOutput(prev => prev + `\nUnexpected Error: ${errorMessage}`);
+      setStatus({ 
+        type: 'error', 
+        message: `Unexpected error: ${errorMessage}` 
+      });
     } finally {
       console.log('[ScriptExecution] Script execution completed');
       setIsRunning(false);

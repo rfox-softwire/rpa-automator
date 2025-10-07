@@ -205,54 +205,53 @@ class ScriptService:
     
     def _inject_playwright_monitoring(self, script_content: str) -> str:
         """
-        Inject monitoring code into the script if it uses Playwright.
-        This wraps the script in a monitoring context to track page interactions.
+        Transform the script to include monitoring using AST.
+        This injects monitoring code to track Playwright script execution.
+        
+        Args:
+            script_content: The original script content to transform
+            
+        Returns:
+            str: The transformed script with monitoring code injected
         """
         if 'playwright' not in script_content.lower():
             return script_content
             
-        # Add monitoring imports and context manager
-        monitoring_imports = (
-            "from playwright.sync_api import sync_playwright\n"
-            "from playwright_monitor import monitor_playwright\n"
-            "import sys\n"
-            "import os\n"
-            "# Add the backend directory to the path to allow imports\n"
-            "sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))\n\n"
-        )
-        
-        # Find the main script content
-        lines = script_content.splitlines()
-        import_lines = []
-        other_lines = []
-        
-        # Separate import lines from other lines
-        for line in lines:
-            if line.strip().startswith(('import ', 'from ')):
-                import_lines.append(line)
-            else:
-                other_lines.append(line)
-        
-        # Reconstruct the script with monitoring
-        monitored_script = []
-        monitored_script.extend(import_lines)
-        monitored_script.append("")
-        monitored_script.append("# --- Monitoring Code (Injected) ---")
-        monitored_script.append(monitoring_imports)
-        
-        # Add the monitoring context manager
-        monitored_script.append("# Wrap the script in a monitoring context")
-        monitored_script.append("if __name__ == '__main__':")
-        monitored_script.append("    with monitor_playwright() as context:")
-        
-        # Add the original code, properly indented
-        for line in other_lines:
-            if line.strip():
-                monitored_script.append(f"        {line}")
-            else:
-                monitored_script.append("")
-        
-        return "\n".join(monitored_script)
+        try:
+            from .script_transformer import transform_script
+            return transform_script(script_content)
+        except Exception as e:
+            print(f"Error injecting monitoring: {e}")
+            return script_content
+    
+    async def _ensure_playwright_browsers(self) -> bool:
+        """Ensure Playwright browsers are installed."""
+        try:
+            # Check if playwright is installed
+            try:
+                import playwright
+            except ImportError:
+                return True  # If playwright isn't installed, the package installation will handle it
+                
+            # Try to import the sync API to check browser installation
+            from playwright.sync_api import sync_playwright
+            
+            try:
+                # This will raise an error if browsers aren't installed
+                with sync_playwright() as p:
+                    p.chromium.launch(headless=True).close()
+                return True
+            except Exception as e:
+                print("Playwright browsers not found, installing...")
+                # Install browsers
+                import sys
+                import subprocess
+                subprocess.check_call([sys.executable, "-m", "playwright", "install", "--with-deps", "chromium"])
+                return True
+                
+        except Exception as e:
+            print(f"Error ensuring Playwright browsers are installed: {e}")
+            return False
     
     async def run_script(self, script_path: str) -> ScriptResult:
         """
@@ -274,6 +273,14 @@ class ScriptService:
             # Read the script content first
             with open(script_path, 'r', encoding='utf-8') as f:
                 script_content = f.read()
+            
+            # Check if this is a Playwright script and ensure browsers are installed
+            if 'playwright' in script_content.lower() and not await self._ensure_playwright_browsers():
+                return ScriptResult(
+                    success=False,
+                    error_type="BrowserInstallationError",
+                    error_details={"message": "Failed to install required Playwright browsers"}
+                )
             
             # Ensure required packages are installed
             if not await self.ensure_packages_installed(script_path):
@@ -305,10 +312,24 @@ class ScriptService:
                     )
                 
                 # Run the blocking subprocess in a separate thread
+                print(f"[ScriptService] Starting script execution: {script_path}")
+                print(f"[ScriptService] Temporary script path: {temp_script}")
+                
                 process = await asyncio.to_thread(run_script)
                 stdout = process.stdout
                 stderr = process.stderr
                 returncode = process.returncode
+                
+                print(f"[ScriptService] Script execution completed with return code: {returncode}")
+                print(f"[ScriptService] Script stdout (length: {len(stdout)}): {stdout[:500]}{'...' if len(stdout) > 500 else ''}")
+                print(f"[ScriptService] Script stderr (length: {len(stderr)}): {stderr[:500]}{'...' if len(stderr) > 500 else ''}")
+                
+                # Log the first few lines of the script for debugging
+                print("[ScriptService] First 10 lines of script:")
+                for i, line in enumerate(script_content.split('\n')[:10]):
+                    print(f"  {i+1}: {line}")
+                if len(script_content.split('\n')) > 10:
+                    print(f"  ... and {len(script_content.split('\n')) - 10} more lines")
             except subprocess.TimeoutExpired:
                 # If timeout occurs, the subprocess.run will raise this exception
                 if temp_script.exists():

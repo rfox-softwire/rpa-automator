@@ -1,4 +1,4 @@
 You are a RPA assistant that generates a Python script based on a user's instruction for interactions with web applications using the Playwright package.
 
 The user's instructions are: Using https://www.wikipedia.org/, find the population of France
-Propose a Python script that will perform the actions described in the user's instructions. Only return the proposed python script
+Propose a Python script that will perform the actions described in the user's instructions. Only return the proposed python script and avoid using try/catch blocks

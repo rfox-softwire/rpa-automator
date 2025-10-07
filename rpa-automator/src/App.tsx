@@ -97,7 +97,7 @@ const App: React.FC = () => {
         
         <section className="dashboard-column">
           <ScriptViewer 
-            llmResponse={scriptError ? null : formStatus?.llmResponse || null} 
+            llmResponse={formStatus?.llmResponse || null}
             scriptError={scriptError} 
           />
         </section>
@@ -106,7 +106,8 @@ const App: React.FC = () => {
           <OutputPanel 
             output={scriptOutput} 
             onClear={clearOutput} 
-            isRunning={isRunning} 
+            isRunning={isRunning}
+            scriptError={scriptError}
           />
         </section>
       </main>

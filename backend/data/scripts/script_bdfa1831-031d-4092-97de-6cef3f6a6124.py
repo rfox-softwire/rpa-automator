@@ -1,0 +1,57 @@
+# Install Playwright if you haven't already:
+#   pip install playwright
+#   playwright install
+
+import asyncio
+from playwright.async_api import async_playwright
+
+async def main():
+    async with async_playwright() as p:
+        # Launch a headless browser (change to `headless=False` for debugging)
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context()
+        page = await context.new_page()
+
+        # 1️⃣ Go to Wikipedia
+        await page.goto("https://www.wikipedia.org/")
+
+        # 2️⃣ Search for "France"
+        # The search input has id 'searchInput'
+        await page.fill("#searchInput", "France")
+        # Submit the form by pressing Enter
+        await page.press("#searchInput", "Enter")
+
+        # Wait until the article content loads
+        await page.wait_for_selector("h1#firstHeading")  # Article title
+
+        # 3️⃣ Locate the population in the infobox.
+        # Wikipedia uses a table with class 'infobox' and rows <tr>.
+        # The population is typically inside a row where the header contains "Population".
+        # We'll look for a span that has the label "Population" and then grab the following cell.
+
+        # Get all rows of the infobox
+        rows = await page.query_selector_all("table.infobox tr")
+
+        population_value = None
+        for row in rows:
+            # Check if this row contains a header with "Population"
+            header = await row.query_selector("th")
+            if header:
+                text = (await header.inner_text()).strip()
+                if "Population" in text:
+                    # The value is usually in the adjacent <td>
+                    data_cell = await row.query_selector("td")
+                    if data_cell:
+                        population_value = (await data_cell.inner_text()).strip()
+                        break
+
+        if population_value:
+            print(f"Population of France: {population_value}")
+        else:
+            print("Could not find the population value.")
+
+        # Close everything
+        await context.close()
+        await browser.close()
+
+asyncio.run(main())

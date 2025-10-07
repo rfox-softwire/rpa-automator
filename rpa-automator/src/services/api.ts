@@ -53,21 +53,54 @@ export const runScript = async (scriptId: string): Promise<{
   stdout?: string;
   stderr?: string;
   error?: string;
-  returncode?: number;
   error_type?: string;
+  error_details?: any;
+  suggestions?: string[];
+  returncode?: number;
   traceback?: string;
+  details?: any;
+  script_content?: string;
 }> => {
   console.log(`[API] Running script with ID: ${scriptId}`);
-  const response = await fetch(`${API_BASE_URL}/scripts/${scriptId}/run`, {
-    method: 'POST',
-  });
-  
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({}));
-    throw new Error(error.detail || 'Failed to execute script');
+  try {
+    const response = await fetch(`${API_BASE_URL}/scripts/${scriptId}/run`, {
+      method: 'POST',
+    });
+    
+    const responseData = await response.json().catch(() => ({}));
+    
+    if (!response.ok) {
+      // Structure the error response to match the expected ScriptError type
+      return {
+        success: false,
+        error: responseData.error || responseData.detail || 'Failed to execute script',
+        error_type: responseData.error_type || 'api_error',
+        stderr: responseData.stderr || responseData.detail,
+        traceback: responseData.traceback,
+        details: responseData.error_details || responseData,
+        returncode: responseData.returncode,
+        suggestions: responseData.suggestions,
+        script_content: responseData.script_content
+      };
+    }
+    
+    return { 
+      success: true, 
+      ...responseData,
+      // Ensure we always have an error_type for consistency
+      error_type: responseData.error_type || (responseData.error ? 'execution_error' : undefined)
+    };
+  } catch (error) {
+    console.error('[API] Error executing script:', error);
+    // Handle network errors or invalid JSON responses
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error occurred',
+      error_type: 'network_error',
+      stderr: error instanceof Error ? error.stack : String(error),
+      details: error instanceof Error ? { message: error.message, stack: error.stack } : { error: String(error) }
+    };
   }
-  
-  return response.json();
 };
 
 // export const validateUrls = async (scriptContent: string) => {

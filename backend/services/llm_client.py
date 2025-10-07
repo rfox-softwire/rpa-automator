@@ -12,12 +12,12 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class LLMClient:
-    def __init__(self, base_url: str = config['INFERENCE_SERVER_URL'], timeout: float = 180.0):
+    def __init__(self, base_url: str = config['INFERENCE_SERVER_URL'], timeout: float = 300.0):
         """Initialize the LLM client.
         
         Args:
             base_url: Base URL of the LLM inference server
-            timeout: Request timeout in seconds (default: 180 seconds / 3 minutes)
+            timeout: Request timeout in seconds (default: 300 seconds / 5 minutes)
         """
         self.base_url = base_url
         self.timeout = timeout
@@ -32,7 +32,7 @@ class LLMClient:
             await self._client.aclose()
             self._client = None
 
-    async def generate_text(self, prompt: str, max_tokens: int = 100, temperature: float = 0.7) -> dict:
+    async def generate_text(self, prompt: str, max_tokens: int = -1, temperature: float = 0.7) -> dict:
         """Generate text from the LLM.
         
         Args:

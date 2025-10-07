@@ -6,7 +6,7 @@ def get_generate_prompt(instruction: str) -> str:
         "You are a RPA assistant that generates a Python script based on a user's instruction "
         "for interactions with web applications using the Playwright package.\n\n"
         f"The user's instructions are: {instruction}\n"
-        "Propose a Python script that will perform the actions described in the user's instructions. Only return the proposed python script"
+        "Propose a Python script that will perform the actions described in the user's instructions. Only return the proposed python script and avoid using try/catch blocks"
     )
 
 def get_repair_prompt(instruction: str, error_context: str, original_script: str, page_history: List[Dict[str, Any]] = None) -> str:
@@ -23,6 +23,7 @@ def get_repair_prompt(instruction: str, error_context: str, original_script: str
         "for interactions with web applications using the Playwright package.\n\n"
         f"The user is trying to fix an error in their script. Here's the error that occurred:\n{error_context}\n\n"
         f"Here's the original script that had the error:\n```python\n{original_script}\n```\n\n"
+        "Only return the proposed python script and avoid using try/catch blocks"
     ]
     
     # Add page history if available

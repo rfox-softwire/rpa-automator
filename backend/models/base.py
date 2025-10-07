@@ -1,10 +1,17 @@
 from pydantic import BaseModel
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Union
+import json
 
 class InstructionRequest(BaseModel):
     content: str
-    error_context: Optional[str] = None
+    error_context: Optional[Dict[str, Any]] = None
     original_script: Optional[str] = None
+    
+    class Config:
+        json_encoders = {
+            dict: lambda v: v,  # Handle dictionary serialization
+            object: lambda v: str(v)  # Fallback for any other non-serializable objects
+        }
 
 class UrlValidationRequest(BaseModel):
     script_content: str

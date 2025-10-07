@@ -1,0 +1,53 @@
+You are a RPA assistant that generates a Python script based on a user's instruction for interactions with web applications using the Playwright package.
+
+The user is trying to fix an error in their script. Here's the error that occurred:
+{'error_type': 'RuntimeError', 'error': 'RuntimeError', 'stderr': 'Traceback (most recent call last):\n  File "C:\\Work\\rpa-work\\rpa-automator\\backend\\data\\scripts\\temp_171d5bbb.py", line 40, in <module>\n    main()\n    ~~~~^^\n  File "C:\\Work\\rpa-work\\rpa-automator\\backend\\data\\scripts\\temp_171d5bbb.py", line 23, in main\n    page.wait_for_selector("table.infobox.geography.vcard", timeout=10000)\n    ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File "C:\\Users\\ryafox\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\playwright\\sync_api\\_generated.py", line 8182, in wait_for_selector\n    self._sync(\n    ~~~~~~~~~~^\n        self._impl_obj.wait_for_selector(\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n            selector=selector, timeout=timeout, state=state, strict=strict\n            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n        )\n        ^\n    )\n    ^\n  File "C:\\Users\\ryafox\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\playwright\\_impl\\_sync_base.py", line 115, in _sync\n    return task.result()\n           ~~~~~~~~~~~^^\n  File "C:\\Users\\ryafox\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\playwright\\_impl\\_page.py", line 423, in wait_for_selector\n    return await self._main_frame.wait_for_selector(**locals_to_params(locals()))\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File "C:\\Users\\ryafox\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\playwright\\_impl\\_frame.py", line 369, in wait_for_selector\n    await self._channel.send(\n        "waitForSelector", self._timeout, locals_to_params(locals())\n    )\n  File "C:\\Users\\ryafox\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\playwright\\_impl\\_connection.py", line 69, in send\n    return await self._connection.wrap_api_call(\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    ...<3 lines>...\n    )\n    ^\n  File "C:\\Users\\ryafox\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\playwright\\_impl\\_connection.py", line 558, in wrap_api_call\n    raise rewrite_error(error, f"{parsed_st[\'apiName\']}: {error}") from None\nplaywright._impl._errors.TimeoutError: Page.wait_for_selector: Timeout 10000ms exceeded.\nCall log:\n  - waiting for locator("table.infobox.geography.vcard") to be visible\n    - waiting for navigation to finish...\n    - navigated to "https://en.wikipedia.org/wiki/France"\n\n', 'traceback': ''}
+
+Here's the original script that had the error:
+```python
+# Install Playwright first (if not already installed):
+#   pip install playwright
+#   playwright install
+
+from playwright.sync_api import sync_playwright
+
+def main():
+    with sync_playwright() as p:
+        # Launch a headless browser (set headless=False to see the browser)
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context()
+        page = context.new_page()
+
+        # 1️⃣ Open Wikipedia
+        page.goto("https://www.wikipedia.org/")
+
+        # 2️⃣ Search for "France"
+        search_input = page.locator("input[name='search']")
+        search_input.fill("France")
+        page.keyboard.press("Enter")
+
+        # Wait until the page loads and the infobox is visible
+        page.wait_for_selector("table.infobox.geography.vcard", timeout=10000)
+
+        # 3️⃣ Extract the population from the infobox
+        # The population usually appears in a row that contains the text "Population"
+        # We'll look for a <span> with class "bday" which holds the numeric value.
+        try:
+            pop_span = page.locator("table.infobox.geography.vcard td:has-text('Population') + td span.bday")
+            population_text = pop_span.inner_text()
+            print(f"Population of France (according to Wikipedia): {population_text}")
+        except Exception as e:
+            print("Could not find the population value:", e)
+
+        # Clean up
+        context.close()
+        browser.close()
+
+if __name__ == "__main__":
+    main()
+```
+
+
+
+Please generate a corrected version of the script that fixes the error while maintaining the original functionality.
+The user's original instruction was: Using https://www.wikipedia.org/, find the population of France
