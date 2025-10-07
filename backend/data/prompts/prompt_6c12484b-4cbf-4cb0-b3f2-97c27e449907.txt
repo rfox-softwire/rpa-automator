@@ -1,0 +1,56 @@
+You are a RPA assistant that generates a Python script based on a user's instruction for interactions with web applications using the Playwright package.
+
+The user is trying to fix an error in their script. Here's the error that occurred:
+{'error_type': 'execution_error', 'error': 'Script execution failed', 'stderr': '', 'traceback': ''}
+
+Here's the original script that had the error:
+```python
+import asyncio
+from playwright.async_api import async_playwright
+
+
+async def get_france_population() -> str:
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context()
+        page = await context.new_page()
+
+        # Go to Wikipedia homepage
+        await page.goto("https://www.wikipedia.org/")
+
+        # Type "France" into the search box and submit
+        await page.fill("input#searchInput", "France")
+        await page.press("input#searchInput", "Enter")
+
+        # Wait for the article page to load
+        await page.wait_for_selector("span#mw-hidden-xs")
+
+        # Extract the population value from the infobox
+        population_text = await page.inner_text(
+            'table.infobox.vcard tr:has(td:has-text("Population")) td:last-child'
+        )
+
+        await browser.close()
+        return population_text.strip()
+
+
+async def main():
+    population = await get_france_population()
+    print(f"France population (from Wikipedia): {population}")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+IMPORTANT: The script will be executed in an async context. Please ensure it follows these rules:
+1. Use `from playwright.async_api import async_playwright` instead of the sync API
+2. Make all functions async and use await for Playwright operations
+3. The main function should be async and use `async with async_playwright() as p:`
+4. Do not use try/catch blocks
+5. The script should be self-contained and include all necessary imports
+
+Only return the proposed python script.
+
+Please generate a corrected version of the script that fixes the error while maintaining the original functionality.
+The user's original instruction was: Using https://www.wikipedia.org/, return the population of France

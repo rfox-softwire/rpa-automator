@@ -17,10 +17,38 @@ from urllib.parse import urlparse
 
 from models.base import ScriptResult, ScriptError
 
+import warnings
+
 class ScriptService:
+    """Deprecated: Use SyncScriptService instead.
+    
+    This class is kept for backward compatibility but will be removed in a future version.
+    Please update your code to use SyncScriptService from sync_script_service.py
+    """
+    
     def __init__(self, scripts_dir: str = "data/scripts"):
+        """Initialize the ScriptService with the directory to store scripts.
+        
+        .. deprecated:: 1.0.0
+           Use :class:`SyncScriptService` instead.
+        
+        Args:
+            scripts_dir: Directory where scripts will be stored. Will be created if it doesn't exist.
+        """
+        warnings.warn(
+            'ScriptService is deprecated and will be removed in a future version. '
+            'Use SyncScriptService instead.',
+            DeprecationWarning,
+            stacklevel=2
+        )
         self.scripts_dir = Path(scripts_dir)
-        self.scripts_dir.mkdir(exist_ok=True)
+        try:
+            self.scripts_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to create scripts directory '{scripts_dir}': {str(e)}\n"
+                "Please check if you have the necessary permissions or specify a different directory."
+            )
     
     async def validate_urls(self, script_content: str) -> Dict[str, Any]:
         """Validate all URLs in a script to ensure they are accessible."""
@@ -219,12 +247,38 @@ class ScriptService:
             
         try:
             from .script_transformer import transform_script
-            return transform_script(script_content)
+            
+            # Add a startup message at the beginning of the script
+            startup_message = """
+# --- Script Execution Started ---
+import sys
+print("\n[Script Monitor] Playwright script execution started")
+print(f"[Script Monitor] Python version: {sys.version}")
+print("[Script Monitor] Monitoring browser interactions...\n")
+# --- End of Startup Message ---\n
+"""
+            
+            # Transform the script with monitoring
+            transformed_script = transform_script(script_content)
+            return startup_message + transformed_script
+            
         except Exception as e:
-            print(f"Error injecting monitoring: {e}")
-            return script_content
+            import traceback
+            error_details = traceback.format_exc()
+            print(f"[Script Monitor] Error injecting monitoring: {error_details}")
+            
+            # Still add the startup message even if monitoring injection fails
+            startup_message = f"""
+# --- Script Execution Started ---
+import sys
+print("\n[Script Monitor] Script execution started (monitoring initialization failed)")
+print(f"[Script Monitor] Python version: {{sys.version}}")
+print(f"[Script Monitor] Error: {{str(e)}}\n")
+# --- End of Startup Message ---\n
+"""
+            return startup_message + script_content
     
-    async def _ensure_playwright_browsers(self) -> bool:
+    def _ensure_playwright_browsers(self) -> bool:
         """Ensure Playwright browsers are installed."""
         try:
             # Check if playwright is installed
@@ -299,26 +353,112 @@ class ScriptService:
             with open(temp_script, 'w', encoding='utf-8') as f:
                 f.write(monitored_script)
             
-            # Execute the script with a timeout using subprocess.run in a thread
+            # Log the script content for debugging
+            print(f"[ScriptService] Starting script execution: {script_path}")
+            print(f"[ScriptService] Temporary script path: {temp_script}")
+            print(f"[ScriptService] Script content (first 20 lines):")
+            with open(temp_script, 'r', encoding='utf-8') as f:
+                for i, line in enumerate(f):
+                    if i < 20:  # Only show first 20 lines to avoid cluttering logs
+                        print(f"  {i+1}: {line.rstrip()}")
+                    else:
+                        print(f"  ... and {sum(1 for _ in f) + 1} more lines")
+                        break
+            
+            # Create a queue to collect output lines
+            output_queue = asyncio.Queue()
+            
+            async def read_stream(stream, is_stderr=False):
+                while True:
+                    try:
+                        line = await stream.readline()
+                        if not line:
+                            break
+                        line = line.decode('utf-8', errors='replace').rstrip()
+                        # Print to console for immediate feedback
+                        prefix = '[STDERR]' if is_stderr else '[STDOUT]'
+                        print(f"{prefix} {line}")
+                        await output_queue.put({
+                            'type': 'stderr' if is_stderr else 'stdout',
+                            'content': line
+                        })
+                    except Exception as e:
+                        error_msg = f"Error reading {'stderr' if is_stderr else 'stdout'}: {str(e)}"
+                        print(f"[ScriptService] {error_msg}")
+                        await output_queue.put({
+                            'type': 'error',
+                            'content': error_msg
+                        })
+                        break
+            
             try:
-                def run_script():
-                    return subprocess.run(
-                        [sys.executable, str(temp_script)],
-                        capture_output=True,
-                        text=True,
-                        timeout=300,  # 5 minutes timeout
-                        encoding='utf-8',
-                        errors='replace'
+                # Create the subprocess with PIPE for streaming
+                process = await asyncio.create_subprocess_exec(
+                    sys.executable, str(temp_script),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                
+                # Start reading from stdout and stderr
+                stdout_task = asyncio.create_task(read_stream(process.stdout))
+                stderr_task = asyncio.create_task(read_stream(process.stderr, is_stderr=True))
+                
+                # Wait for the process to complete or timeout
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=300)  # 5 minutes timeout
+                except asyncio.TimeoutError:
+                    process.terminate()
+                    await output_queue.put({
+                        'type': 'error',
+                        'content': 'Script execution timed out after 300 seconds'
+                    })
+                    return ScriptResult(
+                        success=False,
+                        error_type="TimeoutError",
+                        error_details={"message": "Script execution timed out after 300 seconds"},
+                        script_content=script_content
                     )
                 
-                # Run the blocking subprocess in a separate thread
-                print(f"[ScriptService] Starting script execution: {script_path}")
-                print(f"[ScriptService] Temporary script path: {temp_script}")
+                # Wait for all output to be read
+                await asyncio.gather(stdout_task, stderr_task)
                 
-                process = await asyncio.to_thread(run_script)
-                stdout = process.stdout
-                stderr = process.stderr
+                # Get the final return code
                 returncode = process.returncode
+                
+                # Collect all output
+                stdout_lines = []
+                stderr_lines = []
+                
+                while not output_queue.empty():
+                    item = await output_queue.get()
+                    if item['type'] == 'stdout':
+                        stdout_lines.append(item['content'])
+                    else:
+                        stderr_lines.append(item['content'])
+                
+                stdout = '\n'.join(stdout_lines)
+                stderr = '\n'.join(stderr_lines)
+                
+                # If script failed with non-zero exit code but no stderr, provide more context
+                if returncode != 0 and not stderr:
+                    stderr = f"Script exited with non-zero status code: {returncode}\n"
+                    stderr += "No error output was captured. This could be due to:\n"
+                    stderr += "1. The script called sys.exit() with a non-zero code\n"
+                    stderr += "2. The script was terminated by a signal\n"
+                    stderr += "3. The error output was not properly captured"
+                
+                # Try to extract page history from the output if available
+                page_history = []
+                try:
+                    # Look for the execution log in the output
+                    for line in stdout.split('\n') + stderr.split('\n'):
+                        if line.strip().startswith('PLAYWRIGHT_EXECUTION_LOG:'):
+                            log_data = json.loads(line.split('PLAYWRIGHT_EXECUTION_LOG:')[1].strip())
+                            if 'page_history' in log_data:
+                                page_history = log_data['page_history']
+                                break
+                except Exception as e:
+                    print(f"[ScriptService] Error extracting page history: {e}")
                 
                 print(f"[ScriptService] Script execution completed with return code: {returncode}")
                 print(f"[ScriptService] Script stdout (length: {len(stdout)}): {stdout[:500]}{'...' if len(stdout) > 500 else ''}")
@@ -341,14 +481,100 @@ class ScriptService:
                     script_content=script_content
                 )
             except Exception as e:
-                # Clean up the temp file before re-raising
-                if temp_script.exists():
+                # Get the full traceback
+                import traceback
+                tb = traceback.format_exc()
+                
+                # Default error details
+                error_type = type(e).__name__
+                error_message = str(e)
+                suggestions = []
+                line_number = None
+                
+                # Extract line number from traceback if available
+                tb_lines = traceback.extract_tb(e.__traceback__)
+                if tb_lines:
+                    # Get the last frame where the error occurred
+                    frame = tb_lines[-1]
+                    line_number = frame.lineno
+                    
+                    # Try to get the problematic line from the script
+                    problematic_line = ""
+                    try:
+                        with open(script_path, 'r', encoding='utf-8') as f:
+                            lines = f.readlines()
+                            if 0 < line_number <= len(lines):
+                                problematic_line = lines[line_number - 1].strip()
+                    except Exception:
+                        pass
+                    
+                    # Add context to error message
+                    error_message = f"{error_type} at line {line_number}: {error_message}"
+                    if problematic_line:
+                        error_message += f"\nProblematic line: {problematic_line}"
+                
+                # Common error patterns and suggestions
+                if "ModuleNotFoundError" in error_type:
+                    module_name = error_message.split("'")[1] if "'" in error_message else ""
+                    suggestions = [
+                        f"The script is trying to use the '{module_name}' module which is not installed",
+                        f"Try installing it with: pip install {module_name}",
+                        "If using a virtual environment, make sure it's activated"
+                    ]
+                elif "ImportError" in error_type:
+                    suggestions = [
+                        "There was an error importing a module or package",
+                        "Check if all required dependencies are installed",
+                        "Verify that the module names are spelled correctly"
+                    ]
+                elif "NameError" in error_type:
+                    suggestions = [
+                        "The script is trying to use a variable or function that hasn't been defined",
+                        "Check for typos in variable and function names",
+                        "Make sure all variables are defined before they are used"
+                    ]
+                elif "SyntaxError" in error_type:
+                    suggestions = [
+                        "There's a syntax error in the script",
+                        f"Check line {line_number} and the lines around it for typos",
+                        "Common issues include missing colons, unmatched brackets, or incorrect indentation"
+                    ]
+                elif "TimeoutError" in error_type:
+                    suggestions = [
+                        "The script took too long to execute (timeout after 300 seconds)",
+                        "Check for infinite loops or long-running operations",
+                        "If the script needs more time, consider optimizing it or increasing the timeout"
+                    ]
+                else:
+                    suggestions = [
+                        "An unexpected error occurred during script execution",
+                        "Check the error message and traceback for more details",
+                        "Review the script for any logical errors or edge cases"
+                    ]
+                
+                # Clean up the temp file
+                if temp_script and temp_script.exists():
                     temp_script.unlink()
+                
+                # Create error details with page history if available
+                error_details = {
+                    "message": error_message,
+                    "traceback": tb,
+                    "line_number": line_number,
+                    "suggestions": suggestions
+                }
+                
+                # Add page history to error details if available
+                if 'page_history' in locals() and page_history:
+                    error_details["page_history"] = page_history
+                
                 return ScriptResult(
                     success=False,
-                    error_type="RuntimeError",
-                    error_details={"message": f"Script execution failed: {str(e)}"},
-                    script_content=script_content
+                    error_type=error_type,
+                    error_details=error_details,
+                    script_content=script_content,
+                    stdout=stdout if 'stdout' in locals() else "",
+                    stderr=tb  # Include full traceback in stderr
                 )
             finally:
                 # Clean up the temporary file

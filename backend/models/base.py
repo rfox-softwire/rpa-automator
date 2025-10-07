@@ -6,6 +6,7 @@ class InstructionRequest(BaseModel):
     content: str
     error_context: Optional[Dict[str, Any]] = None
     original_script: Optional[str] = None
+    page_history: Optional[List[Dict[str, Any]]] = None
     
     class Config:
         json_encoders = {

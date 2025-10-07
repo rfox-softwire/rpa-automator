@@ -1,5 +1,20 @@
 import { ApiResponse, ScriptError } from '../types';
 
+export type ScriptEvent = {
+  type: 'output' | 'error' | 'complete';
+  content?: string;
+  is_error?: boolean;
+  message?: string;
+  error_type?: string;
+  success?: boolean;
+  error?: {
+    type?: string;
+    message?: string;
+    traceback?: string;
+    suggestions?: string[];
+  };
+};
+
 const API_BASE_URL = 'http://localhost:8000/api';
 
 export const submitInstruction = async (content: string, isRepair: boolean, scriptError?: ScriptError) => {
@@ -48,7 +63,12 @@ export const fetchScriptContent = async (scriptId: string): Promise<string | nul
   return data.content || null;
 };
 
-export const runScript = async (scriptId: string): Promise<{
+interface RunScriptOptions {
+  scriptId: string;
+  onEvent?: (event: ScriptEvent) => void;
+}
+
+interface RunScriptResult {
   success: boolean;
   stdout?: string;
   stderr?: string;
@@ -60,17 +80,34 @@ export const runScript = async (scriptId: string): Promise<{
   traceback?: string;
   details?: any;
   script_content?: string;
-}> => {
+}
+
+export const runScript = async (options: string | RunScriptOptions): Promise<RunScriptResult> => {
+  const scriptId = typeof options === 'string' ? options : options.scriptId;
+  const onEvent = typeof options === 'object' ? options.onEvent : undefined;
   console.log(`[API] Running script with ID: ${scriptId}`);
+  
   try {
     const response = await fetch(`${API_BASE_URL}/scripts/${scriptId}/run`, {
       method: 'POST',
+      headers: {
+        'Accept': 'text/event-stream',
+      },
     });
-    
-    const responseData = await response.json().catch(() => ({}));
-    
-    if (!response.ok) {
-      // Structure the error response to match the expected ScriptError type
+
+    if (!response.ok || !response.body) {
+      const responseData = await response.json().catch(() => ({}));
+      
+      // If we have an onEvent callback, send the error there
+      if (onEvent) {
+        onEvent({
+          type: 'error',
+          message: responseData.error || responseData.detail || 'Failed to execute script',
+          error_type: responseData.error_type || 'api_error',
+        });
+      }
+      
+      // Return the error in the expected format
       return {
         success: false,
         error: responseData.error || responseData.detail || 'Failed to execute script',
@@ -83,16 +120,87 @@ export const runScript = async (scriptId: string): Promise<{
         script_content: responseData.script_content
       };
     }
-    
-    return { 
-      success: true, 
-      ...responseData,
-      // Ensure we always have an error_type for consistency
-      error_type: responseData.error_type || (responseData.error ? 'execution_error' : undefined)
-    };
+
+    // If no onEvent callback, fall back to the old behavior
+    if (!onEvent) {
+      const responseData = await response.json();
+      return { 
+        success: true, 
+        ...responseData,
+        error_type: responseData.error_type || (responseData.error ? 'execution_error' : undefined)
+      };
+    }
+
+    // Handle streaming response
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let result: RunScriptResult = { success: true };
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        
+        // Process complete SSE messages
+        const lines = buffer.split('\n\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          
+          try {
+            const match = line.match(/^data: (.+)$/m);
+            if (!match) continue;
+            
+            const event = JSON.parse(match[1]) as ScriptEvent;
+            
+            // Forward the event to the callback
+            onEvent(event);
+            
+            // Update the result with the latest data
+            if (event.type === 'complete') {
+              result = {
+                success: event.success || false,
+                ...(event.error && {
+                  error: event.error.message,
+                  error_type: event.error.type,
+                  traceback: event.error.traceback,
+                  suggestions: event.error.suggestions,
+                }),
+              };
+            } else if (event.type === 'output') {
+              if (event.is_error) {
+                result.stderr = (result.stderr || '') + (event.content || '') + '\n';
+              } else {
+                result.stdout = (result.stdout || '') + (event.content || '') + '\n';
+              }
+            }
+          } catch (e) {
+            console.error('Error processing SSE message:', e);
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+
+    return result;
   } catch (error) {
     console.error('[API] Error executing script:', error);
-    // Handle network errors or invalid JSON responses
+    
+    // If we have an onEvent callback, send the error there
+    if (onEvent) {
+      onEvent({
+        type: 'error',
+        message: error instanceof Error ? error.message : 'Unknown error occurred',
+        error_type: 'network_error',
+      });
+    }
+    
+    // Return the error in the expected format
     return {
       success: false,
       error: error instanceof Error ? error.message : 'Unknown error occurred',
@@ -102,19 +210,3 @@ export const runScript = async (scriptId: string): Promise<{
     };
   }
 };
-
-// export const validateUrls = async (scriptContent: string) => {
-//   console.log('[API] Validating URLs in script content');
-//   const response = await fetch(`${API_BASE_URL}/scripts/validate-urls`, {
-//     method: 'POST',
-//     headers: { 'Content-Type': 'application/json' },
-//     body: JSON.stringify({ script_content: scriptContent })
-//   });
-
-//   if (!response.ok) {
-//     const error = await response.json().catch(() => ({}));
-//     throw new Error(error.detail || 'Failed to validate URLs');
-//   }
-
-//   return response.json();
-// };

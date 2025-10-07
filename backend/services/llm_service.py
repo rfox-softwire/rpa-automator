@@ -24,7 +24,8 @@ class LLMService:
                 prompt = get_repair_prompt(
                     instruction=instruction.content,
                     error_context=instruction.error_context,
-                    original_script=instruction.original_script
+                    original_script=instruction.original_script,
+                    page_history=instruction.page_history or []
                 )
                 is_repair = True
             else:

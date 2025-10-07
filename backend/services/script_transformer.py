@@ -61,7 +61,9 @@ class PlaywrightTransformer(ast.NodeTransformer):
             ast.Import(names=[ast.alias(name='os', asname=None)]),
             ast.Import(names=[ast.alias(name='sys', asname=None)]),
             sys_path_append,
-            ast.ImportFrom(module='backend.services.playwright_tracker', names=[ast.alias(name='PlaywrightTracker', as_='pt')], level=0),
+            ast.ImportFrom(module='backend.services.playwright_tracker', 
+                          names=[ast.alias(name='PlaywrightTracker', asname='tracker')], 
+                          level=0),
             ast.ImportFrom(
                 module='playwright.sync_api',
                 names=[ast.alias(name='sync_playwright')],
@@ -77,43 +79,35 @@ class PlaywrightTransformer(ast.NodeTransformer):
             return self.generic_visit(node)
         
         # Track the context variable
+        context_var = None
         if isinstance(node.items[0].optional_vars, ast.Name):
-            self.context_vars.add(node.items[0].optional_vars.id)
+            context_var = node.items[0].optional_vars.id
+            self.context_vars.add(context_var)
         
         # Add tracker initialization before the with block
-        tracker_init = ast.parse(
-            f"{self.tracker_var} = pt.PlaywrightTracker()"
-        ).body
+        tracker_init = ast.Expr(
+            value=ast.Call(
+                func=ast.Name(id='print', ctx=ast.Load()),
+                args=[ast.Constant(value="[Script Monitor] Initializing Playwright monitoring...")],
+                keywords=[]
+            )
+        )
         
         # Process the body of the with block
         self.generic_visit(node)
         
-        # Wrap the original with block and add tracker finalization
-        try_block = ast.Try(
-            body=node.body,
-            handlers=[],
-            orelse=[],
-            finalbody=[
-                ast.Expr(value=ast.Call(
-                    func=ast.Attribute(
-                        value=ast.Name(id=self.tracker_var, ctx=ast.Load()),
-                        attr='finalize',
-                        ctx=ast.Load()
-                    ),
-                    args=[ast.Constant(value=True)],
-                    keywords=[]
-                ))
-            ]
-        )
+        # Add page wrapping for the context
+        if context_var:
+            # Add code to wrap the browser context
+            wrap_code = ast.parse(f"""
+{context_var} = tracker.wrap_browser({context_var})
+            """).body
+            node.body = wrap_code + node.body
         
-        # Create a try-finally block around the original with
-        node.body = [try_block]
+        # Add tracker initialization at the beginning
+        node.body = [tracker_init] + node.body
         
-        # Return the modified with node with tracker init
-        return ast.fix_missing_locations(ast.Module(
-            body=tracker_init + [node],
-            type_ignores=[]
-        ))
+        return node
     
     def _is_playwright_context(self, node: ast.With) -> bool:
         """Check if this is a Playwright context manager."""
@@ -152,8 +146,14 @@ def transform_script(script_content: str) -> str:
         transformer = PlaywrightTransformer()
         new_tree = transformer.visit(tree)
         ast.fix_missing_locations(new_tree)
+        
+        # Add a final print statement to show monitoring is active
+        final_print = ast.parse('print("[Script Monitor] Script monitoring is active")')
+        if isinstance(new_tree, ast.Module):
+            new_tree.body.extend(final_print.body)
+        
         return astor.to_source(new_tree)
     except Exception as e:
-        # If transformation fails, return the original script
-        print(f"Error transforming script: {e}")
+        # If transformation fails, return the original script with a warning
+        print(f"[Script Monitor] Warning: Could not inject monitoring: {e}")
         return script_content

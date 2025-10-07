@@ -1,4 +1,5 @@
 from fastapi import APIRouter, HTTPException, Depends, Request
+from fastapi.responses import StreamingResponse
 from typing import Dict, Any, List, Optional
 import json
 import asyncio
@@ -17,13 +18,13 @@ from backend.models import (
 )
 from backend.services.llm_service import LLMService
 from backend.services.llm_client import LLMClient
-from backend.services.script_service import ScriptService
+from backend.services.sync_script_service import SyncScriptService
 
 # Configure logging
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-script_service = ScriptService()
+script_service = SyncScriptService()
 
 # Initialize LLM client and service
 llm_client = LLMClient()
@@ -121,9 +122,9 @@ async def get_script(script_id: str) -> Dict[str, Any]:
         error_msg = f"Error retrieving script: {str(e)}"
         raise HTTPException(status_code=500, detail=error_msg)
 
-@router.post("/scripts/{script_id}/run", response_model=Dict[str, Any])
-async def execute_script(script_id: str) -> Dict[str, Any]:
-    """Execute a previously generated script by its ID."""
+@router.post("/scripts/{script_id}/run")
+async def execute_script(script_id: str):
+    """Execute a previously generated script by its ID with streaming output."""
     try:
         script_path = script_service.scripts_dir / f"script_{script_id}.py"
         if not script_path.exists():
@@ -132,7 +133,6 @@ async def execute_script(script_id: str) -> Dict[str, Any]:
                 detail={
                     "error_type": "ScriptNotFoundError",
                     "message": f"Script with ID {script_id} not found",
-                    "script_id": script_id,
                     "suggestions": [
                         "Check if the script ID is correct",
                         "The script may have been deleted or never created"
@@ -141,79 +141,164 @@ async def execute_script(script_id: str) -> Dict[str, Any]:
             )
         
         logger.info(f"Executing script: {script_path}")
-        result = await script_service.run_script(str(script_path))
         
-        if result.success:
-            return {
-                "status": "success",
-                "output": result.stdout,
-                "script_id": script_id,
-                "execution_time": getattr(result, 'execution_time', None)
-            }
-        else:
-            # Format a more detailed error response
-            error_details = {
-                "error_type": result.error_type or "ScriptExecutionError",
-                "message": result.error_details.get("message", "Script execution failed") if result.error_details else "Script execution failed",
-                "script_id": script_id,
-                "suggestions": []
-            }
+        async def event_stream():
+            output_queue = asyncio.Queue()
             
-            # Add specific suggestions based on error type
-            if "ModuleNotFoundError" in str(result.error_type):
-                error_details["suggestions"] = [
-                    "The script is trying to use a Python module that is not installed",
-                    f"Try installing the missing module with: pip install {result.error_details.get('message', '').split()[-1]}"
-                ]
-            elif "TimeoutError" in str(result.error_type):
-                error_details["suggestions"] = [
-                    "The script took too long to execute (timeout after 5 minutes)",
-                    "Check for infinite loops or long-running operations in your script",
-                    "Consider optimizing your script or increasing the timeout if needed"
-                ]
-            elif "FileNotFoundError" in str(result.error_type):
-                error_details["suggestions"] = [
-                    "The script is trying to access a file that doesn't exist",
-                    f"Check if the file path is correct: {result.error_details.get('message', '')}",
-                    "Make sure all required files are in the correct location"
-                ]
+            def run_script_sync():
+                return script_service.run_script(str(script_path))
             
-            # Include the full error details if available
-            if hasattr(result, 'error_details') and result.error_details:
-                error_details["details"] = result.error_details
+            async def process_script_output():
+                try:
+                    # Run the synchronous script in a thread pool
+                    loop = asyncio.get_event_loop()
+                    result = await loop.run_in_executor(None, run_script_sync)
+                    
+                    if result.success:
+                        # Send success response
+                        await output_queue.put({
+                            "type": "complete",
+                            "success": True,
+                            "stdout": result.output or "",
+                            "stderr": result.stderr or ""
+                        })
+                    else:
+                        # Prepare error details
+                        error_details = {
+                            "error_type": result.error_type or "ScriptExecutionError",
+                            "message": result.error_details.get("message", "Script execution failed") if hasattr(result, 'error_details') and result.error_details else "Script execution failed",
+                            "suggestions": []
+                        }
+                        
+                        # Add specific suggestions based on error type
+                        if "ModuleNotFoundError" in str(result.error_type):
+                            error_details["suggestions"] = [
+                                "The script is trying to use a Python module that is not installed",
+                                f"Try installing the missing module with: pip install {result.error_details.get('message', '').split()[-1]}"
+                            ]
+                        elif "TimeoutError" in str(result.error_type):
+                            error_details["suggestions"] = [
+                                "The script took too long to execute (timeout after 5 minutes)",
+                                "Check for infinite loops or long-running operations in your script"
+                            ]
+                        elif "FileNotFoundError" in str(result.error_type):
+                            error_details["suggestions"] = [
+                                "The script is trying to access a file that doesn't exist",
+                                f"Check the file path: {result.error_details.get('message', '')}"
+                            ]
+                        
+                        # Send error response
+                        await output_queue.put({
+                            "type": "complete",
+                            "success": False,
+                            "error": error_details,
+                            "stdout": result.stdout or "",
+                            "stderr": result.stderr or ""
+                        })
+                        
+                except Exception as e:
+                    logger.error(f"Error executing script: {str(e)}", exc_info=True)
+                    await output_queue.put({
+                        "type": "error",
+                        "message": f"Unexpected error: {str(e)}",
+                        "error_type": "InternalServerError"
+                    })
+                finally:
+                    await output_queue.put(None)  # Signal the end of the stream
             
-            # Include stderr if available
-            if hasattr(result, 'stderr') and result.stderr:
-                error_details["stderr"] = result.stderr
+            # Start processing the script output in the background
+            asyncio.create_task(process_script_output())
+            
+            # Stream the output as it becomes available
+            while True:
+                try:
+                    result = await asyncio.wait_for(output_queue.get(), timeout=300)  # 5 minute timeout
+                    
+                    if result["type"] == "complete":
+                        # Send the final result
+                        yield f"data: {json.dumps(result)}\n\n"
+                        break
+                        
+                except asyncio.TimeoutError:
+                    yield "data: " + json.dumps({
+                        "type": "error",
+                        "error_type": "TimeoutError",
+                        "message": "Script execution timed out after 5 minutes",
+                        "suggestions": [
+                            "The script took too long to execute",
+                            "Check for infinite loops or long-running operations",
+                            "Consider optimizing the script or increasing the timeout"
+                        ]
+                    }) + "\n\n"
+                    break
+                except Exception as e:
+                    logger.error(f"Error streaming script output: {str(e)}", exc_info=True)
+                    yield "data: " + json.dumps({
+                        "type": "error",
+                        "error_type": "InternalServerError",
+                        "message": f"An unexpected error occurred while streaming the script output: {str(e)}",
+                        "suggestions": [
+                            "Check the server logs for more detailed error information",
+                            "Contact support if the issue persists"
+                        ]
+                    }) + "\n\n"
+                    break
                 
-            return {
-                "status": "error",
-                **error_details
-            }
+                # Small delay to prevent overwhelming the client
+                await asyncio.sleep(0.1)
             
-    except HTTPException as http_exc:
-        # Re-raise HTTP exceptions as is
-        raise http_exc
+            # Final event to indicate stream completion
+            yield "data: {\"type\": \"complete\"}\n\n"
+        
+        try:
+            # Return the streaming response with appropriate headers
+            return StreamingResponse(
+                event_stream(),
+                media_type="text/event-stream",
+                headers={
+                    'Cache-Control': 'no-cache',
+                    'Connection': 'keep-alive',
+                    'X-Accel-Buffering': 'no'  # Disable buffering for nginx
+                }
+            )
+        except Exception as e:
+            logger.error(f"Error creating streaming response: {str(e)}", exc_info=True)
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "error_type": "StreamingError",
+                    "message": f"Failed to create streaming response: {str(e)}",
+                    "suggestions": [
+                        "Check the server logs for more detailed error information",
+                        "Contact support if the issue persists"
+                    ]
+                }
+            )
+        
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Unexpected error executing script {script_id}: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "error_type": "InternalServerError",
-                "message": f"An unexpected error occurred while executing the script: {str(e)}",
-                "script_id": script_id,
-                "suggestions": [
-                    "Check the server logs for more detailed error information",
-                    "Contact support if the issue persists"
-                ]
-            }
-        )
+        error_msg = f"An unexpected error occurred while executing the script: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        
+        # For non-streaming errors, return a proper error response
+        if 'event_stream' not in locals():
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "error_type": "InternalServerError",
+                    "message": error_msg,
+                    "suggestions": [
+                        "Check the server logs for more detailed error information",
+                        "Contact support if the issue persists"
+                    ]
+                }
+            )
 
 @router.post("/generate-text", response_model=LLMResponse)
 async def generate_text(request: Dict[str, Any], llm_service: LLMService = Depends()) -> LLMResponse:
     """
     Direct endpoint to generate text using the LLM.
-    
     Example request body:
     {
         "prompt": "Tell me a joke about programming",
