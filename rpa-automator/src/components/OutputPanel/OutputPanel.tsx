@@ -52,81 +52,120 @@ export const OutputPanel: React.FC<OutputPanelProps> = ({ output, onClear, isRun
     <div className="dashboard-card">
       <div className="dashboard-card__header">
         <h3 className="dashboard-card__title">
-          {scriptError ? 'Error Details' : 'Output'}
+          {scriptError ? (
+            <span>{scriptError.error_type || 'Error Details'}</span>
+          ) : 'Output'}
         </h3>
         {(output || scriptError) && (
           <button 
             className="clear-output"
             onClick={onClear}
             disabled={isRunning}
+            aria-label={scriptError ? 'Clear error' : 'Clear output'}
           >
             Clear {scriptError ? 'Error' : 'Output'}
           </button>
         )}
       </div>
       <div className="output-content">
-        {scriptError && (
+        {scriptError ? (
           <div className="error-details">
             <div className="error-message">
               <div className="error-summary">
-                <p><strong>Error:</strong> {scriptError.error}</p>
-                {scriptError.error_type && <p><strong>Type:</strong> {scriptError.error_type}</p>}
-                {scriptError.returncode !== undefined && <p><strong>Exit Code:</strong> {scriptError.returncode}</p>}
+                <p className="error-description">{scriptError.error}</p>
+                
+                <div className="error-metadata">
+                  {scriptError.error_type && (
+                    <div className="metadata-item">
+                      <span className="metadata-label">Type:</span>
+                      <span className="metadata-value error-type">
+                        {scriptError.error_type}
+                      </span>
+                    </div>
+                  )}
+                  
+                  {scriptError.returncode !== undefined && (
+                    <div className="metadata-item">
+                      <span className="metadata-label">Exit Code:</span>
+                      <span className="metadata-value">{scriptError.returncode}</span>
+                    </div>
+                  )}
+                  
+                  {scriptError.timestamp && (
+                    <div className="metadata-item">
+                      <span className="metadata-label">Time:</span>
+                      <span className="metadata-value">
+                        {new Date(scriptError.timestamp).toLocaleString()}
+                      </span>
+                    </div>
+                  )}
+                </div>
               </div>
               
               {scriptError.suggestions && scriptError.suggestions.length > 0 && (
                 <div className="error-section">
-                  <h5>Suggestions:</h5>
+                  <h5 className="section-title">Suggestions</h5>
                   <ul className="suggestions">
                     {scriptError.suggestions.map((suggestion, i) => (
-                      <li key={i} className="suggestion-item">{suggestion}</li>
+                      <li key={i} className="suggestion-item">
+                        <span className="bullet">•</span>
+                        {suggestion}
+                      </li>
                     ))}
                   </ul>
                 </div>
               )}
               
-              {scriptError.details && (
+              {scriptError.possible_causes && scriptError.possible_causes.length > 0 && (
                 <div className="error-section">
-                  <h5>Additional Details:</h5>
+                  <h5 className="section-title">Possible Causes</h5>
+                  <ul className="causes">
+                    {scriptError.possible_causes.map((cause, i) => (
+                      <li key={i} className="cause-item">{cause}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              
+              {scriptError.stderr && (
+                <div className="error-section">
+                  <h5 className="section-title">Error Output</h5>
+                  <pre className="error-output">
+                    {scriptError.stderr}
+                  </pre>
+                </div>
+              )}
+              
+              {scriptError.traceback && (
+                <div className="error-section">
+                  <h5 className="section-title">Stack Trace</h5>
+                  <pre className="traceback">
+                    {scriptError.traceback}
+                  </pre>
+                </div>
+              )}
+              
+              {scriptError.details && Object.keys(scriptError.details).length > 0 && (
+                <div className="error-section">
+                  <h5 className="section-title">Additional Details</h5>
                   <div className="details-content">
                     {renderJsonData(scriptError.details)}
                   </div>
                 </div>
               )}
               
-              {scriptError.stderr && (
-                <div className="error-section">
-                  <h5>Error Output:</h5>
-                  <pre className="error-output">{scriptError.stderr}</pre>
-                </div>
-              )}
-              
-              {scriptError.traceback && (
-                <div className="error-section">
-                  <h5>Traceback:</h5>
-                  <pre className="traceback">{scriptError.traceback}</pre>
-                </div>
-              )}
-              
-              {scriptError.script_path && (
-                <div className="error-section">
-                  <h5>Script Path:</h5>
-                  <pre className="script-path">{scriptError.script_path}</pre>
-                </div>
-              )}
-              
               {scriptError.page_history && scriptError.page_history.length > 0 && (
                 <div className="error-section">
-                  <h5>Page History:</h5>
+                  <h5 className="section-title">Page History
+                  </h5>
                   <div className="page-history">
                     {scriptError.page_history.map((page, i) => (
                       <div key={i} className="page-history-item">
-                        <div className="page-history-url">
-                          <strong>URL:</strong> {page.url}
-                        </div>
-                        {page.title && (
-                          <div className="page-history-title">
-                            <strong>Title:</strong> {page.title}
+                        <div className="page-url">{page.url}</div>
+                        {page.title && <div className="page-title">{page.title}</div>}
+                        {page.timestamp && (
+                          <div className="page-timestamp">
+                            {new Date(page.timestamp).toLocaleString()}
                           </div>
                         )}
                       </div>
@@ -136,12 +175,14 @@ export const OutputPanel: React.FC<OutputPanelProps> = ({ output, onClear, isRun
               )}
             </div>
           </div>
-        )}
-        {output && (
-          <pre>{output}</pre>
-        )}
-        {!output && (
-          <p className="empty-state">Script output will appear here</p>
+        ) : (
+          <div className="script-output">
+            {output ? (
+              <pre>{output}</pre>
+            ) : (
+              <p className="empty-state">Script output will appear here</p>
+            )}
+          </div>
         )}
       </div>
     </div>

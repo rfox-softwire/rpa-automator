@@ -16,19 +16,66 @@ export interface PageHistoryItem {
   html?: string;
 }
 
+export type ScriptErrorType = 
+  | 'TimeoutError' 
+  | 'ScriptError' 
+  | 'ExecutionError' 
+  | 'SyntaxError' 
+  | 'RuntimeError' 
+  | 'NetworkError' 
+  | 'ApiError' 
+  | 'UnknownError';
+
 export interface ScriptError {
+  // Core error information
   error: string;
+  error_type?: ScriptErrorType;
+  message?: string;
+  type?: 'output' | 'error' | 'complete';
+  content?: string;
+  is_error?: boolean;
+  
+  // Script execution context
   stderr?: string;
   stdout?: string;
   returncode?: number;
+  traceback?: string;
+  
+  // Script metadata
   script_content?: string;
   script_id?: string;
   script_path?: string;
-  error_type?: string;
-  traceback?: string;
-  page_history?: PageHistoryItem[];
+  
+  // Additional context
+  timestamp?: string;
+  duration?: number; // in seconds
+  
+  // Response fields
+  success?: boolean;
+  error_details?: Record<string, any>;
+  details?: {
+    line_number?: number;
+    column_number?: number;
+    function_name?: string;
+    file_path?: string;
+    [key: string]: any;
+  };
+  
+  // User guidance and error handling
   suggestions?: string[];
-  details?: any;
+  possible_causes?: string[];
+  
+  // Page history for web automation context
+  page_history?: PageHistoryItem[];
+  
+  // Original error (for debugging)
+  original_error?: any;
+  
+  // Error severity
+  severity?: 'info' | 'warning' | 'error' | 'critical';
+  
+  // Additional metadata
+  metadata?: Record<string, any>;
 }
 
 export interface InstructionFormData {

@@ -34,6 +34,10 @@ class ScriptError(BaseModel):
     traceback: Optional[str] = None
     script_content: Optional[str] = None
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 class ScriptResult(BaseModel):
     success: bool
     stdout: str = ""
@@ -44,3 +48,11 @@ class ScriptResult(BaseModel):
     error_details: Dict[str, Any] = {}
     script_id: Optional[str] = None
     script_path: Optional[str] = None
+    page_history: List[Dict[str, Any]] = []
+    
+    def __init__(self, **data):
+        super().__init__(**data)
+        if self.page_history:
+            logger.info(f"ScriptResult created with {len(self.page_history)} page history entries")
+            for i, page in enumerate(self.page_history):
+                logger.debug(f"Page {i + 1}: {page.get('url', 'No URL')} - {page.get('title', 'No title')}")

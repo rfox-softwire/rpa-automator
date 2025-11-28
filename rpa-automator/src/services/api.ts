@@ -1,18 +1,40 @@
 import { ApiResponse, ScriptError } from '../types';
 
 export type ScriptEvent = {
+  // Event type and basic info
   type: 'output' | 'error' | 'complete';
   content?: string;
   is_error?: boolean;
   message?: string;
-  error_type?: string;
   success?: boolean;
-  error?: {
+  
+  // Error information
+  error?: string | {
     type?: string;
     message?: string;
     traceback?: string;
     suggestions?: string[];
+    details?: Record<string, any>;
   };
+  error_type?: string;
+  error_details?: Record<string, any>;
+  
+  // Execution context
+  stdout?: string;
+  stderr?: string;
+  traceback?: string;
+  returncode?: number;
+  
+  // Script information
+  script_content?: string;
+  
+  // Additional metadata
+  suggestions?: string[];
+  possible_causes?: string[];
+  page_history?: Array<Record<string, any>>;
+  
+  // Additional details
+  details?: Record<string, any>;
 };
 
 const API_BASE_URL = 'http://localhost:8000/api';
@@ -70,143 +92,211 @@ interface RunScriptOptions {
 
 interface RunScriptResult {
   success: boolean;
+  type?: 'output' | 'error' | 'complete';
+  content?: string;
+  is_error?: boolean;
+  message?: string;
   stdout?: string;
   stderr?: string;
   error?: string;
   error_type?: string;
-  error_details?: any;
+  error_details?: Record<string, any>;
   suggestions?: string[];
+  possible_causes?: string[];
   returncode?: number;
   traceback?: string;
-  details?: any;
+  details?: Record<string, any>;
   script_content?: string;
+  page_history?: Array<Record<string, any>>;
 }
 
 export const runScript = async (options: string | RunScriptOptions): Promise<RunScriptResult> => {
   const scriptId = typeof options === 'string' ? options : options.scriptId;
   const onEvent = typeof options === 'object' ? options.onEvent : undefined;
-  console.log(`[API] Running script with ID: ${scriptId}`);
   
   try {
     const response = await fetch(`${API_BASE_URL}/scripts/${scriptId}/run`, {
       method: 'POST',
       headers: {
-        'Accept': 'text/event-stream',
+        'Accept': 'application/json',
+        'Content-Type': 'application/json',
       },
     });
 
-    if (!response.ok || !response.body) {
-      const responseData = await response.json().catch(() => ({}));
+    const responseData = await response.json().catch(() => ({
+      error: 'Failed to parse server response',
+      error_type: 'response_parse_error',
+      success: false
+    }));
+    
+    if (!response.ok) {
+      // Handle error response
+      const errorData: ScriptError = {
+        error: responseData.error || responseData.message || 'Failed to execute script',
+        error_type: responseData.error_type || 'api_error',
+        message: responseData.message || responseData.error || 'An unknown error occurred',
+        stderr: responseData.stderr,
+        traceback: responseData.traceback,
+        details: responseData.details || responseData.error_details || {},
+        returncode: responseData.returncode,
+        suggestions: Array.isArray(responseData.suggestions) ? responseData.suggestions : [],
+        possible_causes: Array.isArray(responseData.possible_causes) ? responseData.possible_causes : [],
+        script_content: responseData.script_content,
+        type: responseData.type || 'error',
+        is_error: true,
+        success: false
+      };
       
-      // If we have an onEvent callback, send the error there
       if (onEvent) {
         onEvent({
           type: 'error',
-          message: responseData.error || responseData.detail || 'Failed to execute script',
-          error_type: responseData.error_type || 'api_error',
+          content: errorData.error || 'Script execution failed',
+          is_error: true,
+          message: errorData.message,
+          error_type: errorData.error_type,
+          stderr: errorData.stderr,
+          traceback: errorData.traceback,
+          suggestions: errorData.suggestions,
+          possible_causes: errorData.possible_causes,
+          script_content: errorData.script_content,
+          error: {
+            type: errorData.error_type || 'execution_error',
+            message: errorData.message,
+            traceback: errorData.traceback,
+            suggestions: errorData.suggestions,
+            details: errorData.details
+          }
         });
       }
       
-      // Return the error in the expected format
       return {
         success: false,
-        error: responseData.error || responseData.detail || 'Failed to execute script',
-        error_type: responseData.error_type || 'api_error',
-        stderr: responseData.stderr || responseData.detail,
-        traceback: responseData.traceback,
-        details: responseData.error_details || responseData,
-        returncode: responseData.returncode,
-        suggestions: responseData.suggestions,
-        script_content: responseData.script_content
+        error: errorData.error,
+        error_type: errorData.error_type,
+        message: errorData.message,
+        stderr: errorData.stderr,
+        stdout: responseData.stdout,
+        returncode: errorData.returncode,
+        details: errorData.details,
+        suggestions: errorData.suggestions,
+        possible_causes: errorData.possible_causes,
+        script_content: errorData.script_content
       };
     }
 
-    // If no onEvent callback, fall back to the old behavior
-    if (!onEvent) {
-      const responseData = await response.json();
-      return { 
-        success: true, 
-        ...responseData,
-        error_type: responseData.error_type || (responseData.error ? 'execution_error' : undefined)
+    // Handle successful response
+    const result: RunScriptResult = {
+      success: responseData.success === true,
+      type: responseData.type || 'complete',
+      content: responseData.content || responseData.stdout || '',
+      is_error: responseData.is_error || false,
+      message: responseData.message,
+      stdout: responseData.stdout || '',
+      stderr: responseData.stderr || '',
+      error: responseData.error,
+      error_type: responseData.error_type,
+      error_details: responseData.error_details || responseData.details,
+      suggestions: Array.isArray(responseData.suggestions) ? responseData.suggestions : [],
+      possible_causes: Array.isArray(responseData.possible_causes) ? responseData.possible_causes : [],
+      returncode: responseData.returncode,
+      traceback: responseData.traceback,
+      details: responseData.details || {},
+      script_content: responseData.script_content,
+      page_history: Array.isArray(responseData.page_history) ? responseData.page_history : []
+    };
+
+    // If we have an event callback, send the appropriate event
+    if (onEvent) {
+      const eventData: ScriptEvent = {
+        type: result.type || 'complete',
+        content: result.content,
+        is_error: result.is_error,
+        message: result.message,
+        stdout: result.stdout,
+        stderr: result.stderr,
+        error: result.error ? {
+          type: result.error_type || 'ExecutionError',
+          message: result.error,
+          traceback: result.traceback,
+          suggestions: result.suggestions,
+          details: result.details || {}
+        } : undefined,
+        error_type: result.error_type,
+        returncode: result.returncode,
+        traceback: result.traceback,
+        script_content: result.script_content,
+        suggestions: result.suggestions,
+        possible_causes: result.possible_causes,
+        details: result.details || {},
+        page_history: result.page_history,
+        error_details: result.error_details
       };
-    }
 
-    // Handle streaming response
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    let result: RunScriptResult = { success: true };
-
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        
-        // Process complete SSE messages
-        const lines = buffer.split('\n\n');
-        buffer = lines.pop() || '';
-
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          
-          try {
-            const match = line.match(/^data: (.+)$/m);
-            if (!match) continue;
-            
-            const event = JSON.parse(match[1]) as ScriptEvent;
-            
-            // Forward the event to the callback
-            onEvent(event);
-            
-            // Update the result with the latest data
-            if (event.type === 'complete') {
-              result = {
-                success: event.success || false,
-                ...(event.error && {
-                  error: event.error.message,
-                  error_type: event.error.type,
-                  traceback: event.error.traceback,
-                  suggestions: event.error.suggestions,
-                }),
-              };
-            } else if (event.type === 'output') {
-              if (event.is_error) {
-                result.stderr = (result.stderr || '') + (event.content || '') + '\n';
-              } else {
-                result.stdout = (result.stdout || '') + (event.content || '') + '\n';
-              }
-            }
-          } catch (e) {
-            console.error('Error processing SSE message:', e);
-          }
-        }
-      }
-    } finally {
-      reader.releaseLock();
+      onEvent(eventData);
     }
 
     return result;
   } catch (error) {
-    console.error('[API] Error executing script:', error);
+    console.error('Error running script:', error);
     
-    // If we have an onEvent callback, send the error there
+    const errorObj = error as Error;
+    const errorData: ScriptError = {
+      error: errorObj.message || 'Failed to execute script',
+      error_type: 'NetworkError',
+      message: errorObj.message || 'A network error occurred while executing the script',
+      type: 'error',
+      is_error: true,
+      success: false,
+      details: { 
+        stack: errorObj.stack,
+        name: errorObj.name
+      },
+      suggestions: [
+        'Check your network connection',
+        'Verify the server is running and accessible',
+        'Check the browser console for detailed error information',
+        'Try refreshing the page and trying again'
+      ],
+      possible_causes: [
+        'Network connectivity issues',
+        'Server is down or unreachable',
+        'CORS configuration problems',
+        'Browser extension interference'
+      ]
+    };
+    
     if (onEvent) {
-      onEvent({
+      const eventData: ScriptEvent = {
         type: 'error',
-        message: error instanceof Error ? error.message : 'Unknown error occurred',
-        error_type: 'network_error',
-      });
+        content: errorData.error,
+        is_error: true,
+        message: errorData.message,
+        error_type: errorData.error_type,
+        details: errorData.details,
+        suggestions: errorData.suggestions,
+        possible_causes: errorData.possible_causes,
+        error: {
+          type: errorData.error_type,
+          message: errorData.message,
+          details: errorData.details,
+          suggestions: errorData.suggestions
+        },
+        stdout: '',
+        stderr: errorObj.message,
+        returncode: -1
+      };
+      onEvent(eventData);
     }
     
-    // Return the error in the expected format
     return {
       success: false,
-      error: error instanceof Error ? error.message : 'Unknown error occurred',
-      error_type: 'network_error',
-      stderr: error instanceof Error ? error.stack : String(error),
-      details: error instanceof Error ? { message: error.message, stack: error.stack } : { error: String(error) }
+      error: errorData.error,
+      error_type: errorData.error_type,
+      message: errorData.message,
+      details: errorData.details,
+      suggestions: errorData.suggestions,
+      possible_causes: errorData.possible_causes,
+      is_error: true,
+      stderr: errorObj.message,
+      returncode: -1
     };
-  }
-};
